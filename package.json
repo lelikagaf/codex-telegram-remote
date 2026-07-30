@@ -1,0 +1,16 @@
+{
+  "name": "codex-telegram-remote",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Локальный Telegram-пульт для управления чатами Codex Desktop",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node src/index.js",
+    "check": "node --check src/index.js && node --check src/bot.js && node --check src/codex-client.js && node --check src/telegram-client.js",
+    "test": "node --test",
+    "diagnose": "node scripts/diagnose-codex.js"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
