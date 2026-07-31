@@ -1,6 +1,8 @@
 const { formatThread, formatThreadList, splitText, threadTitle } = require("./format");
 const { redact } = require("./logger");
 
+const DESKTOP_TURN_SETTLE_MS = 6000;
+
 const HELP_TEXT = [
   "Команды:",
   "/chats — последние чаты Codex",
@@ -34,6 +36,10 @@ function isAgentMessage(item) {
   return item?.type === "agentMessage" || item?.type === "agent_message";
 }
 
+function isUserMessage(item) {
+  return item?.type === "userMessage" || item?.type === "user_message";
+}
+
 function isThreadBusy(thread) {
   if (thread?.status?.type === "active") return true;
   return Array.isArray(thread?.turns) && thread.turns.some((turn) => turn?.status === "inProgress");
@@ -50,10 +56,27 @@ function extractTurnAnswer(turn) {
   return candidates.map(extractAgentText).filter(Boolean).join("\n\n").trim();
 }
 
+function extractTurnUserText(turn) {
+  const messages = Array.isArray(turn?.items) ? turn.items.filter(isUserMessage) : [];
+  return messages.map(extractAgentText).filter(Boolean).join("\n\n").trim();
+}
+
+function isTerminalTurnStatus(status) {
+  return status === "completed" || status === "interrupted" || status === "failed";
+}
+
+function shouldWaitForTurnAnswer(turn, answer, fromTelegram = false) {
+  return !fromTelegram && isTerminalTurnStatus(turn?.status) && !String(answer || "").trim();
+}
+
+function isDesktopTurnSettled(firstCompletedAt, now = Date.now()) {
+  return Number.isFinite(firstCompletedAt) && now - firstCompletedAt >= DESKTOP_TURN_SETTLE_MS;
+}
+
 function unseenTerminalTurns(turns, seenIds) {
   const seen = seenIds instanceof Set ? seenIds : new Set(seenIds || []);
   return (Array.isArray(turns) ? turns : [])
-    .filter((turn) => turn?.id && turn.status !== "inProgress" && !seen.has(turn.id))
+    .filter((turn) => turn?.id && isTerminalTurnStatus(turn.status) && !seen.has(turn.id))
     .sort((left, right) => {
       const leftTime = left.completedAt || left.startedAt || 0;
       const rightTime = right.completedAt || right.startedAt || 0;
@@ -77,6 +100,7 @@ class CodexTelegramBot {
     this.activeByThread = new Map();
     this.activeByTurn = new Map();
     this.pendingApprovals = new Map();
+    this.desktopTurnFirstCompletedAt = new Map();
     this.desktopSyncTimer = null;
     this.desktopSyncRunning = false;
     this.desktopSyncSuspended = false;
@@ -382,8 +406,30 @@ class CodexTelegramBot {
       for (const turn of newTurns) {
         if (this.state.currentThreadId !== threadId || this.state.lastChatId !== chatId) return;
 
-        if (!telegramTurnIds.has(turn.id)) {
-          const answer = extractTurnAnswer(turn);
+        const fromTelegram = telegramTurnIds.has(turn.id);
+        if (!fromTelegram && isTerminalTurnStatus(turn.status)) {
+          const firstCompletedAt = this.desktopTurnFirstCompletedAt.get(turn.id);
+          if (!isDesktopTurnSettled(firstCompletedAt)) {
+            if (!Number.isFinite(firstCompletedAt)) {
+              this.desktopTurnFirstCompletedAt.set(turn.id, Date.now());
+            }
+            continue;
+          }
+        }
+
+        const answer = fromTelegram ? "" : extractTurnAnswer(turn);
+        if (shouldWaitForTurnAnswer(turn, answer, fromTelegram)) {
+          continue;
+        }
+
+        if (!fromTelegram) {
+          const userText = extractTurnUserText(turn);
+          if (userText) {
+            await this.telegram.sendLongMessage(
+              chatId,
+              `💻 Сообщение из выбранного чата Codex:\n\n${userText}`,
+            );
+          }
           if (answer) {
             await this.telegram.sendLongMessage(
               chatId,
@@ -392,6 +438,7 @@ class CodexTelegramBot {
           }
         }
         this.#rememberTurn(turn.id);
+        this.desktopTurnFirstCompletedAt.delete(turn.id);
       }
     } finally {
       this.desktopSyncRunning = false;
@@ -680,7 +727,12 @@ module.exports = {
   HELP_TEXT,
   extractAgentText,
   extractTurnAnswer,
+  extractTurnUserText,
   isAgentMessage,
+  isDesktopTurnSettled,
+  isTerminalTurnStatus,
   isThreadBusy,
+  isUserMessage,
+  shouldWaitForTurnAnswer,
   unseenTerminalTurns,
 };
