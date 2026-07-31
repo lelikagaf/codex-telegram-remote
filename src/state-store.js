@@ -16,6 +16,8 @@ class StateStore {
       desktopSyncSentUserMessageIds: [],
       desktopSyncSentUserTurnIds: [],
       telegramTurnIds: [],
+      telegramPendingFinals: [],
+      telegramFinalDeliveredTurnIds: null,
     };
   }
 

@@ -1,4 +1,4 @@
-const { formatThread, formatThreadList, splitText, threadTitle } = require("./format");
+const { formatThread, formatThreadList, threadTitle } = require("./format");
 const { redact } = require("./logger");
 
 const DESKTOP_TURN_SETTLE_MS = 6000;
@@ -121,6 +121,35 @@ function appendBoundedUnique(items, value, limit = 200) {
   return [...new Set([...(Array.isArray(items) ? items : []), value])].slice(-limit);
 }
 
+function appendPendingTelegramFinal(items, entry, limit = 200) {
+  const turnId = String(entry?.turnId || "");
+  if (!turnId) return Array.isArray(items) ? items : [];
+  const pending = (Array.isArray(items) ? items : []).filter(
+    (item) => String(item?.turnId || "") !== turnId,
+  );
+  pending.push({
+    turnId,
+    threadId: String(entry.threadId || ""),
+    chatId: entry.chatId,
+  });
+  return pending.slice(-limit);
+}
+
+function formatTelegramTurnResult(turn, text) {
+  const status = turn?.status || "completed";
+  let result = String(text || "").trim();
+  const errorText = turn?.error?.message || turn?.error;
+
+  if (!result && status !== "completed") {
+    result = `Задача завершена со статусом: ${status}`;
+    if (errorText) result += `\n${errorText}`;
+  }
+  if (!result) return "";
+  if (status === "interrupted") return `⏹ Задача остановлена.\n\n${result}`;
+  if (status === "failed") return `❌ ${result}`;
+  return result;
+}
+
 class CodexTelegramBot {
   constructor({ telegram, codex, stateStore, config, logger }) {
     this.telegram = telegram;
@@ -137,6 +166,7 @@ class CodexTelegramBot {
     this.desktopSyncTimer = null;
     this.desktopSyncRunning = false;
     this.desktopSyncSuspended = false;
+    this.telegramFinalDeliveryPromises = new Map();
 
     this.codex.on("notification", (message) => {
       this.#onCodexNotification(message).catch((error) =>
@@ -157,6 +187,7 @@ class CodexTelegramBot {
   }
 
   async initialize() {
+    this.#initializeTelegramFinalDeliveryTracking();
     await this.telegram.deleteWebhook();
     await this.telegram.setMyCommands([
       { command: "chats", description: "Список чатов Codex" },
@@ -184,6 +215,21 @@ class CodexTelegramBot {
       );
     }, this.config.desktopSyncPollMs);
     this.desktopSyncTimer.unref?.();
+  }
+
+  #initializeTelegramFinalDeliveryTracking() {
+    const delivered = this.state.telegramFinalDeliveredTurnIds;
+    const pending = this.state.telegramPendingFinals;
+    if (Array.isArray(delivered) && Array.isArray(pending)) return;
+
+    this.state = this.stateStore.save({
+      // При первом обновлении старые Telegram-turn считаются доставленными,
+      // чтобы не переслать владельцу всю прежнюю историю.
+      telegramFinalDeliveredTurnIds: Array.isArray(delivered)
+        ? delivered
+        : [...new Set(this.state.telegramTurnIds || [])].slice(-500),
+      telegramPendingFinals: Array.isArray(pending) ? pending : [],
+    });
   }
 
   stop() {
@@ -411,7 +457,7 @@ class CodexTelegramBot {
     }
   }
 
-  #rememberTurn(turnId, fromTelegram = false) {
+  #rememberTurn(turnId, fromTelegram = false, delivery = null) {
     const patch = {
       desktopSyncSeenTurnIds: appendBoundedUnique(
         this.state.desktopSyncSeenTurnIds,
@@ -420,19 +466,95 @@ class CodexTelegramBot {
     };
     if (fromTelegram) {
       patch.telegramTurnIds = appendBoundedUnique(this.state.telegramTurnIds, turnId);
+      const alreadyDelivered = (this.state.telegramFinalDeliveredTurnIds || []).includes(turnId);
+      patch.telegramPendingFinals = alreadyDelivered
+        ? this.state.telegramPendingFinals
+        : appendPendingTelegramFinal(this.state.telegramPendingFinals, {
+            turnId,
+            threadId: delivery?.threadId,
+            chatId: delivery?.chatId,
+          });
     }
     this.state = this.stateStore.save(patch);
+  }
+
+  async #sendTelegramFinalOnce(turnId, chatId, text) {
+    if (!turnId) {
+      await this.telegram.sendLongMessage(chatId, text);
+      return true;
+    }
+    if ((this.state.telegramFinalDeliveredTurnIds || []).includes(turnId)) return false;
+
+    const existing = this.telegramFinalDeliveryPromises.get(turnId);
+    if (existing) return existing;
+
+    const delivery = (async () => {
+      await this.telegram.sendLongMessage(chatId, text);
+      this.state = this.stateStore.save({
+        telegramFinalDeliveredTurnIds: appendBoundedUnique(
+          this.state.telegramFinalDeliveredTurnIds,
+          turnId,
+          500,
+        ),
+        telegramPendingFinals: (this.state.telegramPendingFinals || []).filter(
+          (item) => item?.turnId !== turnId,
+        ),
+      });
+      this.logger.info("Финальный ответ Telegram доставлен", { turnId });
+      return true;
+    })();
+    this.telegramFinalDeliveryPromises.set(turnId, delivery);
+    try {
+      return await delivery;
+    } finally {
+      this.telegramFinalDeliveryPromises.delete(turnId);
+    }
+  }
+
+  async #retryPendingTelegramFinals() {
+    const delivered = new Set(this.state.telegramFinalDeliveredTurnIds || []);
+    const pending = (this.state.telegramPendingFinals || []).filter(
+      (item) => item?.turnId && item?.threadId && item?.chatId && !delivered.has(item.turnId),
+    );
+    if (!pending.length) return;
+
+    const byThread = new Map();
+    for (const item of pending) {
+      if (!byThread.has(item.threadId)) byThread.set(item.threadId, []);
+      byThread.get(item.threadId).push(item);
+    }
+
+    for (const [threadId, entries] of byThread) {
+      try {
+        const result = await this.codex.listTurns(threadId, { limit: 50, itemsView: "full" });
+        const turns = new Map((result.data || []).map((turn) => [turn.id, turn]));
+        for (const entry of entries) {
+          const turn = turns.get(entry.turnId);
+          if (!turn || !isTerminalTurnStatus(turn.status)) continue;
+          const text = formatTelegramTurnResult(turn, extractTurnAnswer(turn));
+          if (!text) continue;
+          await this.#sendTelegramFinalOnce(entry.turnId, entry.chatId, text);
+        }
+      } catch (error) {
+        this.logger.warn("Не удалось повторить доставку финального ответа Telegram", {
+          threadId,
+          message: error.message,
+        });
+      }
+    }
   }
 
   async #pollDesktopAnswers() {
     if (this.desktopSyncRunning || this.desktopSyncSuspended) return;
 
-    const threadId = this.state.currentThreadId;
-    const chatId = this.state.lastChatId;
-    if (!threadId || !chatId) return;
-
     this.desktopSyncRunning = true;
     try {
+      await this.#retryPendingTelegramFinals();
+
+      const threadId = this.state.currentThreadId;
+      const chatId = this.state.lastChatId;
+      if (!threadId || !chatId) return;
+
       if (
         this.state.desktopSyncThreadId !== threadId ||
         !Array.isArray(this.state.desktopSyncSeenTurnIds)
@@ -576,7 +698,7 @@ class CodexTelegramBot {
     try {
       const result = await this.codex.startTurn(threadId, text);
       context.turnId = result.turn.id;
-      this.#rememberTurn(context.turnId, true);
+      this.#rememberTurn(context.turnId, true, { threadId, chatId });
       if (!context.completed) this.activeByTurn.set(context.turnId, context);
     } catch (error) {
       this.activeByThread.delete(threadId);
@@ -637,7 +759,9 @@ class CodexTelegramBot {
   }
 
   #contextFor(params) {
-    return this.activeByTurn.get(params?.turnId) || this.activeByThread.get(params?.threadId);
+    const turnId = params?.turnId || params?.turn?.id;
+    const threadId = params?.threadId || params?.turn?.threadId;
+    return this.activeByTurn.get(turnId) || this.activeByThread.get(threadId);
   }
 
   async #onCodexNotification(message) {
@@ -661,7 +785,10 @@ class CodexTelegramBot {
 
     if (method === "turn/completed") {
       const context = this.#contextFor(params);
-      if (context) await this.#finishTurn(context, params.turn);
+      if (context) {
+        if (!context.turnId) context.turnId = params.turnId || params.turn?.id || null;
+        await this.#finishTurn(context, params.turn);
+      }
       return;
     }
 
@@ -702,23 +829,24 @@ class CodexTelegramBot {
     this.activeByThread.delete(context.threadId);
     if (context.turnId) this.activeByTurn.delete(context.turnId);
 
-    const status = turn?.status || "completed";
-    let text = this.#collectAgentText(context);
-    if (!text) {
-      const errorText = turn?.error?.message || turn?.error;
-      text = status === "completed" ? "✅ Готово." : `Задача завершена со статусом: ${status}`;
-      if (errorText) text += `\n${errorText}`;
-    }
-    if (status === "interrupted") text = `⏹ Задача остановлена.\n\n${text}`;
-    if (status === "failed") text = `❌ ${text}`;
-
-    const chunks = splitText(text);
+    const turnId = context.turnId || turn?.id;
+    const text = formatTelegramTurnResult(turn, this.#collectAgentText(context)) || "✅ Готово.";
     try {
-      await this.telegram.editMessage(context.chatId, context.progressMessageId, chunks[0]);
-      for (const chunk of chunks.slice(1)) await this.telegram.sendMessage(context.chatId, chunk);
+      await this.#sendTelegramFinalOnce(turnId, context.chatId, text);
+      try {
+        await this.telegram.editMessage(
+          context.chatId,
+          context.progressMessageId,
+          "✅ Codex завершил работу. Ответ отправлен следующим сообщением.",
+        );
+      } catch (error) {
+        this.logger.debug("Не удалось обновить сообщение о ходе задачи", error.message);
+      }
     } catch (error) {
-      this.logger.warn("Не удалось отредактировать сообщение; отправляется новое", error.message);
-      await this.telegram.sendLongMessage(context.chatId, text);
+      this.logger.warn("Финальный ответ Telegram не доставлен; будет повторная попытка", {
+        turnId,
+        message: error.message,
+      });
     }
   }
 
@@ -803,6 +931,8 @@ module.exports = {
   extractTurnAnswer,
   extractTurnUserMessages,
   extractTurnUserText,
+  appendPendingTelegramFinal,
+  formatTelegramTurnResult,
   isAgentMessage,
   isDesktopTurnSettled,
   isTerminalTurnStatus,
