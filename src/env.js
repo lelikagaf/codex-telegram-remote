@@ -69,7 +69,7 @@ function loadConfig(projectRoot) {
     codexBinary: (process.env.CODEX_BINARY || "").trim() || null,
     defaultCwd,
     notifyOnStart: parseBoolean(process.env.TELEGRAM_NOTIFY_ON_START, true),
-    notifyAfterSleep: parseBoolean(process.env.TELEGRAM_NOTIFY_AFTER_SLEEP, true),
+    notifyAfterSleep: parseBoolean(process.env.TELEGRAM_NOTIFY_AFTER_SLEEP, false),
     resumeGapMs:
       Math.max(30, Number(process.env.RESUME_NOTIFICATION_GAP_SECONDS) || 120) * 1000,
     desktopSyncPollMs:

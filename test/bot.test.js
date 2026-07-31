@@ -3,6 +3,7 @@ const assert = require("node:assert/strict");
 const {
   extractAgentText,
   extractTurnAnswer,
+  extractTurnUserMessages,
   extractTurnUserText,
   isAgentMessage,
   isDesktopTurnSettled,
@@ -10,6 +11,7 @@ const {
   isThreadBusy,
   isUserMessage,
   shouldWaitForTurnAnswer,
+  unseenSyncTurns,
   unseenTerminalTurns,
 } = require("../src/bot");
 
@@ -57,13 +59,35 @@ test("из turn извлекается только финальный отве�
 
 test("из Desktop-turn извлекается сообщение пользователя", () => {
   const turn = {
+    id: "turn-1",
     items: [
-      { type: "userMessage", content: [{ type: "text", text: "Проверка" }] },
+      { id: "item-1", type: "userMessage", content: [{ type: "text", text: "Проверка" }] },
+      { type: "userMessage", content: [{ type: "text", text: "Уточнение" }] },
       { type: "agentMessage", phase: "final_answer", text: "Готово." },
     ],
   };
   assert.equal(isUserMessage(turn.items[0]), true);
-  assert.equal(extractTurnUserText(turn), "Проверка");
+  assert.deepEqual(extractTurnUserMessages(turn), [
+    { id: "item-1", text: "Проверка" },
+    { id: "turn-1:user:1", text: "Уточнение" },
+  ]);
+  assert.equal(extractTurnUserText(turn), "Проверка\n\nУточнение");
+});
+
+test("unseenSyncTurns включает активный Desktop-turn для немедленной пересылки сообщения", () => {
+  const turns = unseenSyncTurns(
+    [
+      { id: "active", status: "inProgress", startedAt: 20 },
+      { id: "done", status: "completed", completedAt: 30 },
+      { id: "seen", status: "completed", completedAt: 10 },
+      { id: "unknown", status: "newStatus", startedAt: 40 },
+    ],
+    new Set(["seen"]),
+  );
+  assert.deepEqual(
+    turns.map((turn) => turn.id),
+    ["active", "done"],
+  );
 });
 
 test("unseenTerminalTurns исключает активные и уже виденные turns", () => {

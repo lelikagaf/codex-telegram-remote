@@ -17,6 +17,8 @@
 - `/status`, `/stop`, `/steer текст` — управление выполняющейся задачей;
 - `/approve` и `/deny` — ответы на запросы разрешения Codex;
 - потоковое обновление ответа в Telegram;
+- немедленная пересылка каждого сообщения, введённого в выбранном чате
+  Codex Desktop, не дожидаясь завершения ответа;
 - пересылка финальных ответов из Codex Desktop, только если в Telegram выбран
   тот же самый чат;
 - отсутствие повторной пересылки задач, запущенных из Telegram;
@@ -88,7 +90,7 @@ TELEGRAM_ALLOWED_USER_ID=
 CODEX_DEFAULT_CWD=
 CODEX_BINARY=
 TELEGRAM_NOTIFY_ON_START=true
-TELEGRAM_NOTIFY_AFTER_SLEEP=true
+TELEGRAM_NOTIFY_AFTER_SLEEP=false
 RESUME_NOTIFICATION_GAP_SECONDS=120
 DESKTOP_SYNC_POLL_SECONDS=3
 LOG_LEVEL=info
@@ -114,6 +116,12 @@ npm.cmd run diagnose
 
 `diagnose` проверяет поиск `codex.exe`, запускает локальный app-server и читает
 список чатов без подключения к Telegram.
+
+## Обновление установленного бота
+
+Инструкция для человека или другого агента Codex находится в
+[`UPDATING.md`](UPDATING.md). Обновление не должно заменять `.env`,
+`data/state.json` и `logs/bot.log`.
 
 ## Автозапуск
 

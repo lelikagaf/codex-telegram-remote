@@ -13,6 +13,8 @@ class StateStore {
       lastUpdateOffset: 0,
       desktopSyncThreadId: null,
       desktopSyncSeenTurnIds: null,
+      desktopSyncSentUserMessageIds: [],
+      desktopSyncSentUserTurnIds: [],
       telegramTurnIds: [],
     };
   }

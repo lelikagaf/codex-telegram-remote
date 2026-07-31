@@ -56,9 +56,26 @@ function extractTurnAnswer(turn) {
   return candidates.map(extractAgentText).filter(Boolean).join("\n\n").trim();
 }
 
+function extractTurnUserMessages(turn) {
+  const turnId = String(turn?.id || "turn");
+  return (Array.isArray(turn?.items) ? turn.items : [])
+    .map((item, index) => {
+      if (!isUserMessage(item)) return null;
+      const text = extractAgentText(item).trim();
+      if (!text) return null;
+      return {
+        id: String(item.id || `${turnId}:user:${index}`),
+        text,
+      };
+    })
+    .filter(Boolean);
+}
+
 function extractTurnUserText(turn) {
-  const messages = Array.isArray(turn?.items) ? turn.items.filter(isUserMessage) : [];
-  return messages.map(extractAgentText).filter(Boolean).join("\n\n").trim();
+  return extractTurnUserMessages(turn)
+    .map((message) => message.text)
+    .join("\n\n")
+    .trim();
 }
 
 function isTerminalTurnStatus(status) {
@@ -77,6 +94,22 @@ function unseenTerminalTurns(turns, seenIds) {
   const seen = seenIds instanceof Set ? seenIds : new Set(seenIds || []);
   return (Array.isArray(turns) ? turns : [])
     .filter((turn) => turn?.id && isTerminalTurnStatus(turn.status) && !seen.has(turn.id))
+    .sort((left, right) => {
+      const leftTime = left.completedAt || left.startedAt || 0;
+      const rightTime = right.completedAt || right.startedAt || 0;
+      return leftTime - rightTime || String(left.id).localeCompare(String(right.id));
+    });
+}
+
+function unseenSyncTurns(turns, seenIds) {
+  const seen = seenIds instanceof Set ? seenIds : new Set(seenIds || []);
+  return (Array.isArray(turns) ? turns : [])
+    .filter(
+      (turn) =>
+        turn?.id &&
+        !seen.has(turn.id) &&
+        (turn.status === "inProgress" || isTerminalTurnStatus(turn.status)),
+    )
     .sort((left, right) => {
       const leftTime = left.completedAt || left.startedAt || 0;
       const rightTime = right.completedAt || right.startedAt || 0;
@@ -308,6 +341,8 @@ class CodexTelegramBot {
       lastChatId: chatId,
       desktopSyncThreadId: null,
       desktopSyncSeenTurnIds: null,
+      desktopSyncSentUserMessageIds: null,
+      desktopSyncSentUserTurnIds: null,
     });
     try {
       await this.#resetDesktopSyncBaseline(thread.id);
@@ -329,6 +364,8 @@ class CodexTelegramBot {
       lastChatId: chatId,
       desktopSyncThreadId: null,
       desktopSyncSeenTurnIds: null,
+      desktopSyncSentUserMessageIds: null,
+      desktopSyncSentUserTurnIds: null,
     });
     try {
       await this.#resetDesktopSyncBaseline(thread.id);
@@ -357,12 +394,18 @@ class CodexTelegramBot {
     try {
       const result = await this.codex.listTurns(threadId, { limit: 50, itemsView: "full" });
       const seenTurnIds = (result.data || [])
-        .filter((turn) => turn?.id && turn.status !== "inProgress")
+        .filter((turn) => turn?.id && isTerminalTurnStatus(turn.status))
         .map((turn) => turn.id);
+      const sentUserMessageIds = (result.data || []).flatMap((turn) =>
+        extractTurnUserMessages(turn).map((message) => message.id),
+      );
       this.state = this.stateStore.save({
         desktopSyncThreadId: threadId,
         desktopSyncSeenTurnIds: seenTurnIds,
+        desktopSyncSentUserMessageIds: sentUserMessageIds,
+        desktopSyncSentUserTurnIds: [],
       });
+      this.desktopTurnFirstCompletedAt.clear();
     } finally {
       this.desktopSyncSuspended = false;
     }
@@ -400,14 +443,52 @@ class CodexTelegramBot {
 
       const result = await this.codex.listTurns(threadId, { limit: 50, itemsView: "full" });
       const seenIds = new Set(this.state.desktopSyncSeenTurnIds);
+      const sentUserMessageIds = new Set(this.state.desktopSyncSentUserMessageIds || []);
+      const legacySentUserTurnIds = new Set(this.state.desktopSyncSentUserTurnIds || []);
       const telegramTurnIds = new Set(this.state.telegramTurnIds || []);
-      const newTurns = unseenTerminalTurns(result.data, seenIds);
+      const newTurns = unseenSyncTurns(result.data, seenIds);
 
       for (const turn of newTurns) {
         if (this.state.currentThreadId !== threadId || this.state.lastChatId !== chatId) return;
 
         const fromTelegram = telegramTurnIds.has(turn.id);
-        if (!fromTelegram && isTerminalTurnStatus(turn.status)) {
+        if (!fromTelegram) {
+          const userMessages = extractTurnUserMessages(turn);
+          if (legacySentUserTurnIds.has(turn.id) && userMessages.length) {
+            const migratedIds = userMessages
+              .map((message) => message.id)
+              .filter((messageId) => !sentUserMessageIds.has(messageId));
+            for (const messageId of migratedIds) sentUserMessageIds.add(messageId);
+            legacySentUserTurnIds.delete(turn.id);
+            this.state = this.stateStore.save({
+              desktopSyncSentUserMessageIds: migratedIds.reduce(
+                (ids, messageId) => appendBoundedUnique(ids, messageId, 500),
+                this.state.desktopSyncSentUserMessageIds,
+              ),
+              desktopSyncSentUserTurnIds: [...legacySentUserTurnIds],
+            });
+          } else {
+            for (const message of userMessages) {
+              if (sentUserMessageIds.has(message.id)) continue;
+              await this.telegram.sendLongMessage(
+                chatId,
+                `💻 Сообщение из выбранного чата Codex:\n\n${message.text}`,
+              );
+              sentUserMessageIds.add(message.id);
+              this.state = this.stateStore.save({
+                desktopSyncSentUserMessageIds: appendBoundedUnique(
+                  this.state.desktopSyncSentUserMessageIds,
+                  message.id,
+                  500,
+                ),
+              });
+            }
+          }
+        }
+
+        if (!isTerminalTurnStatus(turn.status)) continue;
+
+        if (!fromTelegram) {
           const firstCompletedAt = this.desktopTurnFirstCompletedAt.get(turn.id);
           if (!isDesktopTurnSettled(firstCompletedAt)) {
             if (!Number.isFinite(firstCompletedAt)) {
@@ -423,13 +504,6 @@ class CodexTelegramBot {
         }
 
         if (!fromTelegram) {
-          const userText = extractTurnUserText(turn);
-          if (userText) {
-            await this.telegram.sendLongMessage(
-              chatId,
-              `💻 Сообщение из выбранного чата Codex:\n\n${userText}`,
-            );
-          }
           if (answer) {
             await this.telegram.sendLongMessage(
               chatId,
@@ -727,6 +801,7 @@ module.exports = {
   HELP_TEXT,
   extractAgentText,
   extractTurnAnswer,
+  extractTurnUserMessages,
   extractTurnUserText,
   isAgentMessage,
   isDesktopTurnSettled,
@@ -734,5 +809,6 @@ module.exports = {
   isThreadBusy,
   isUserMessage,
   shouldWaitForTurnAnswer,
+  unseenSyncTurns,
   unseenTerminalTurns,
 };
