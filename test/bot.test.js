@@ -9,7 +9,9 @@ const {
   extractTurnUserMessages,
   extractTurnUserText,
   formatTelegramTurnResult,
+  hasActiveTurn,
   isAgentMessage,
+  isActiveTurnStatus,
   isDesktopTurnSettled,
   isTerminalTurnStatus,
   isThreadBusy,
@@ -89,6 +91,17 @@ test("незавершённый turn считается занятым даже
     }),
     true,
   );
+});
+
+test("проверка занятости распознаёт статусы активного Desktop-turn", () => {
+  for (const status of ["inProgress", "in_progress", "active", "running"]) {
+    assert.equal(isActiveTurnStatus(status), true);
+    assert.equal(hasActiveTurn([{ id: "desktop-turn", status }]), true);
+  }
+  for (const status of ["completed", "interrupted", "failed", undefined, "newStatus"]) {
+    assert.equal(isActiveTurnStatus(status), false);
+    assert.equal(hasActiveTurn([{ id: "desktop-turn", status }]), false);
+  }
 });
 
 test("из turn извлекается только финальный ответ", () => {
@@ -219,6 +232,7 @@ test("финал Telegram-turn отправляется новым сообще�
   const codex = new EventEmitter();
   codex.resumeThread = async () => {};
   codex.readThread = async () => ({ thread: { status: { type: "idle" }, turns: [] } });
+  codex.listTurns = async () => ({ data: [] });
   codex.startTurn = async () => ({ turn: { id: "turn-1" } });
 
   const stateStore = createStateStore();
@@ -256,6 +270,42 @@ test("финал Telegram-turn отправляется новым сообще�
   );
   assert.equal(edits.at(-1).text, "✅ Codex завершил работу. Ответ отправлен следующим сообщением.");
   assert.deepEqual(stateStore.state.telegramPendingFinals, []);
+});
+
+test("Telegram не запускает новый turn, пока Desktop-turn активен", async () => {
+  const sent = [];
+  const telegram = new EventEmitter();
+  telegram.sendMessage = async (chatId, text) => {
+    sent.push({ chatId, text });
+    return { message_id: 10 };
+  };
+
+  let startTurnCalls = 0;
+  const codex = new EventEmitter();
+  codex.resumeThread = async () => {};
+  codex.readThread = async () => ({ thread: { status: { type: "idle" }, turns: [] } });
+  codex.listTurns = async () => ({
+    data: [{ id: "desktop-turn", status: "inProgress" }],
+  });
+  codex.startTurn = async () => {
+    startTurnCalls += 1;
+    return { turn: { id: "telegram-turn" } };
+  };
+
+  const bot = new CodexTelegramBot({
+    telegram,
+    codex,
+    stateStore: createStateStore(),
+    config: { allowedUserId: 7, desktopSyncPollMs: 1000 },
+    logger: createLogger(),
+  });
+
+  await bot.handleUpdate({
+    message: { from: { id: 7 }, chat: { id: 100 }, text: "Не запускать параллельно" },
+  });
+
+  assert.equal(startTurnCalls, 0);
+  assert.match(sent.at(-1).text, /чат сейчас занят/);
 });
 
 test("пропущенный финал Telegram повторно доставляется фоновым опросом", async () => {

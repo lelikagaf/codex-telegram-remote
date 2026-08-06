@@ -40,9 +40,17 @@ function isUserMessage(item) {
   return item?.type === "userMessage" || item?.type === "user_message";
 }
 
+function isActiveTurnStatus(status) {
+  return status === "inProgress" || status === "in_progress" || status === "active" || status === "running";
+}
+
+function hasActiveTurn(turns) {
+  return Array.isArray(turns) && turns.some((turn) => isActiveTurnStatus(turn?.status));
+}
+
 function isThreadBusy(thread) {
   if (thread?.status?.type === "active") return true;
-  return Array.isArray(thread?.turns) && thread.turns.some((turn) => turn?.status === "inProgress");
+  return hasActiveTurn(thread?.turns);
 }
 
 function extractTurnAnswer(turn) {
@@ -671,8 +679,11 @@ class CodexTelegramBot {
     }
 
     await this.codex.resumeThread(threadId);
-    const current = await this.codex.readThread(threadId, false);
-    if (isThreadBusy(current.thread)) {
+    const [current, recentTurns] = await Promise.all([
+      this.codex.readThread(threadId, false),
+      this.codex.listTurns(threadId, { limit: 20, itemsView: "summary" }),
+    ]);
+    if (isThreadBusy(current.thread) || hasActiveTurn(recentTurns.data)) {
       await this.telegram.sendMessage(
         chatId,
         [
@@ -933,7 +944,9 @@ module.exports = {
   extractTurnUserText,
   appendPendingTelegramFinal,
   formatTelegramTurnResult,
+  hasActiveTurn,
   isAgentMessage,
+  isActiveTurnStatus,
   isDesktopTurnSettled,
   isTerminalTurnStatus,
   isThreadBusy,
