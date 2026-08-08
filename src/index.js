@@ -58,7 +58,12 @@ async function main() {
     logger,
     resumeGapMs: config.resumeGapMs,
   });
-  codex = new CodexClient({ launch, cwd: config.defaultCwd, logger });
+  codex = new CodexClient({
+    launch,
+    cwd: config.defaultCwd,
+    approvalPolicy: config.codexApprovalPolicy,
+    logger,
+  });
   bot = new CodexTelegramBot({ telegram, codex, stateStore, config, logger });
 
   await bot.initialize();

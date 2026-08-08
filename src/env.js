@@ -38,6 +38,17 @@ function parseBoolean(value, fallback) {
   return /^(1|true|yes|on)$/i.test(value);
 }
 
+function parseApprovalPolicy(value) {
+  const policy = (value || "never").trim().toLowerCase();
+  if (["never", "on-request", "untrusted"].includes(policy)) return policy;
+
+  const error = new Error(
+    "CODEX_APPROVAL_POLICY должен быть never, on-request или untrusted.",
+  );
+  error.exitCode = 78;
+  throw error;
+}
+
 function loadConfig(projectRoot) {
   loadEnvFile(path.join(projectRoot, ".env"));
 
@@ -67,6 +78,7 @@ function loadConfig(projectRoot) {
     token,
     allowedUserId,
     codexBinary: (process.env.CODEX_BINARY || "").trim() || null,
+    codexApprovalPolicy: parseApprovalPolicy(process.env.CODEX_APPROVAL_POLICY),
     defaultCwd,
     notifyOnStart: parseBoolean(process.env.TELEGRAM_NOTIFY_ON_START, true),
     notifyAfterSleep: parseBoolean(process.env.TELEGRAM_NOTIFY_AFTER_SLEEP, false),
@@ -80,4 +92,4 @@ function loadConfig(projectRoot) {
   };
 }
 
-module.exports = { loadConfig, loadEnvFile, parseBoolean, parseEnv };
+module.exports = { loadConfig, loadEnvFile, parseApprovalPolicy, parseBoolean, parseEnv };

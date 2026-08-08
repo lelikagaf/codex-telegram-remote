@@ -53,6 +53,12 @@ function isThreadBusy(thread) {
   return hasActiveTurn(thread?.turns);
 }
 
+function isUnmaterializedThreadError(error) {
+  return String(error?.message || error || "").includes(
+    "thread/turns/list is unavailable before first user message",
+  );
+}
+
 function extractTurnAnswer(turn) {
   const messages = Array.isArray(turn?.items) ? turn.items.filter(isAgentMessage) : [];
   const finalMessages = messages.filter(
@@ -681,7 +687,10 @@ class CodexTelegramBot {
     await this.codex.resumeThread(threadId);
     const [current, recentTurns] = await Promise.all([
       this.codex.readThread(threadId, false),
-      this.codex.listTurns(threadId, { limit: 20, itemsView: "summary" }),
+      this.codex.listTurns(threadId, { limit: 20, itemsView: "summary" }).catch((error) => {
+        if (isUnmaterializedThreadError(error)) return { data: [] };
+        throw error;
+      }),
     ]);
     if (isThreadBusy(current.thread) || hasActiveTurn(recentTurns.data)) {
       await this.telegram.sendMessage(
@@ -950,6 +959,7 @@ module.exports = {
   isDesktopTurnSettled,
   isTerminalTurnStatus,
   isThreadBusy,
+  isUnmaterializedThreadError,
   isUserMessage,
   shouldWaitForTurnAnswer,
   unseenSyncTurns,

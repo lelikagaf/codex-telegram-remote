@@ -13,10 +13,11 @@ class CodexRpcError extends Error {
 }
 
 class CodexClient extends EventEmitter {
-  constructor({ launch, cwd, logger }) {
+  constructor({ launch, cwd, approvalPolicy = "never", logger }) {
     super();
     this.launch = launch;
     this.cwd = cwd;
+    this.approvalPolicy = approvalPolicy;
     this.logger = logger;
     this.child = null;
     this.lineReader = null;
@@ -47,7 +48,13 @@ class CodexClient extends EventEmitter {
     this.loadedThreads.clear();
     this.child = spawn(
       this.launch.command,
-      [...this.launch.argsPrefix, "app-server", "--stdio"],
+      [
+        ...this.launch.argsPrefix,
+        "--ask-for-approval",
+        this.approvalPolicy,
+        "app-server",
+        "--stdio",
+      ],
       {
         cwd: this.cwd,
         env: process.env,

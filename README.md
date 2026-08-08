@@ -93,6 +93,7 @@ TELEGRAM_BOT_TOKEN=
 TELEGRAM_ALLOWED_USER_ID=
 CODEX_DEFAULT_CWD=
 CODEX_BINARY=
+CODEX_APPROVAL_POLICY=never
 TELEGRAM_NOTIFY_ON_START=true
 TELEGRAM_NOTIFY_AFTER_SLEEP=false
 RESUME_NOTIFICATION_GAP_SECONDS=120
@@ -103,6 +104,9 @@ LOG_LEVEL=info
 Если `CODEX_DEFAULT_CWD` оставить пустым, новые чаты будут создаваться в
 `Documents\Codex` текущего пользователя. Если `CODEX_BINARY` пуст, бот
 автоматически найдёт актуальный `codex.exe` из Codex Desktop.
+`CODEX_APPROVAL_POLICY=never` отключает запросы `/approve` от Codex: действия,
+которым не хватает разрешений, будут возвращаться агенту как ошибка. Для более
+строгого ручного контроля можно указать `on-request` или `untrusted`.
 
 Запуск:
 
@@ -153,6 +157,8 @@ powershell -ExecutionPolicy Bypass -File .\scripts\uninstall-autostart.ps1
 - При утечке токена выполните `/revoke` у `@BotFather`.
 - Любой пользователь, кроме `TELEGRAM_ALLOWED_USER_ID`, блокируется.
 - `/approve` разрешает действие внутри Codex, но не обходит Windows UAC.
+- По умолчанию `CODEX_APPROVAL_POLICY=never` отключает частые запросы
+  подтверждения, но не включает опасный обход sandbox.
 - Бот получает доступ к тем же файлам, что и вошедший пользователь Windows.
 - Не запускайте весь бот с постоянными правами администратора.
 - Не храните рабочий экземпляр на общедоступном сетевом диске.

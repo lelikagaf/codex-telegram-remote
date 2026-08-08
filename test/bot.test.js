@@ -15,6 +15,7 @@ const {
   isDesktopTurnSettled,
   isTerminalTurnStatus,
   isThreadBusy,
+  isUnmaterializedThreadError,
   isUserMessage,
   shouldWaitForTurnAnswer,
   unseenSyncTurns,
@@ -306,6 +307,55 @@ test("Telegram не запускает новый turn, пока Desktop-turn а
 
   assert.equal(startTurnCalls, 0);
   assert.match(sent.at(-1).text, /чат сейчас занят/);
+});
+
+test("первое сообщение запускается в ещё не материализованном чате", async () => {
+  const sent = [];
+  const telegram = new EventEmitter();
+  telegram.sendMessage = async (chatId, text) => {
+    sent.push({ chatId, text });
+    return { message_id: 10 };
+  };
+  telegram.editMessage = async () => {};
+
+  let startTurnCalls = 0;
+  const codex = new EventEmitter();
+  codex.resumeThread = async () => {};
+  codex.readThread = async () => ({ thread: { status: { type: "idle" }, turns: [] } });
+  codex.listTurns = async () => {
+    throw new Error(
+      "thread/turns/list: thread thread-1 is not materialized yet; thread/turns/list is unavailable before first user message",
+    );
+  };
+  codex.startTurn = async () => {
+    startTurnCalls += 1;
+    return { turn: { id: "telegram-turn" } };
+  };
+
+  const bot = new CodexTelegramBot({
+    telegram,
+    codex,
+    stateStore: createStateStore(),
+    config: { allowedUserId: 7, desktopSyncPollMs: 1000 },
+    logger: createLogger(),
+  });
+
+  await bot.handleUpdate({
+    message: { from: { id: 7 }, chat: { id: 100 }, text: "Первое сообщение" },
+  });
+
+  assert.equal(startTurnCalls, 1);
+  assert.equal(sent.at(-1).text, "⏳ Codex начинает работу…");
+});
+
+test("распознаётся ошибка ещё не материализованного чата", () => {
+  assert.equal(
+    isUnmaterializedThreadError(
+      new Error("thread/turns/list is unavailable before first user message"),
+    ),
+    true,
+  );
+  assert.equal(isUnmaterializedThreadError(new Error("other failure")), false);
 });
 
 test("пропущенный финал Telegram повторно доставляется фоновым опросом", async () => {
