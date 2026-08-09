@@ -167,6 +167,19 @@ function nextTelegramUploadPath(cwd, fileName, messageId) {
   return candidate;
 }
 
+function isSystemUploadCwd(cwd) {
+  const resolved = path.resolve(String(cwd || ""));
+  const systemRoot = path.resolve(process.env.SystemRoot || "C:\\Windows");
+  return resolved.toLowerCase() === systemRoot.toLowerCase() ||
+    resolved.toLowerCase().startsWith(`${systemRoot.toLowerCase()}${path.sep}`);
+}
+
+function resolveTelegramUploadCwd(threadCwd, defaultCwd) {
+  const fallback = path.resolve(defaultCwd || process.cwd());
+  const candidate = path.resolve(threadCwd || fallback);
+  return isSystemUploadCwd(candidate) ? fallback : candidate;
+}
+
 function buildDocumentPrompt({ localPath, fileName, mimeType, size, caption }) {
   const instruction = String(caption || "").trim() ||
     "Ознакомься с документом и кратко сообщи, что в нём.";
@@ -407,7 +420,7 @@ class CodexTelegramBot {
     }
 
     const current = await this.codex.readThread(threadId, false);
-    const cwd = current.thread?.cwd || this.config.defaultCwd;
+    const cwd = resolveTelegramUploadCwd(current.thread?.cwd, this.config.defaultCwd);
     const destinationPath = nextTelegramUploadPath(
       cwd,
       document.file_name,
@@ -1105,6 +1118,7 @@ module.exports = {
   isThreadBusy,
   isUnmaterializedThreadError,
   isUserMessage,
+  resolveTelegramUploadCwd,
   nextTelegramUploadPath,
   sanitizeTelegramFileName,
   shouldWaitForTurnAnswer,

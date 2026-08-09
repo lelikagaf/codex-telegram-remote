@@ -19,6 +19,7 @@ const {
   isUnmaterializedThreadError,
   isUserMessage,
   nextTelegramUploadPath,
+  resolveTelegramUploadCwd,
   sanitizeTelegramFileName,
   shouldWaitForTurnAnswer,
   unseenSyncTurns,
@@ -86,6 +87,15 @@ test("имя Telegram-документа очищается от пути и н�
   assert.match(
     nextTelegramUploadPath("C:\\Project", "file.md", 10),
     /\.codex-telegram-uploads[\\/]10-file\.md$/,
+  );
+});
+
+test("загрузка Telegram-документа не использует системный cwd старого чата", () => {
+  const fallback = "C:\\Users\\lelik\\Documents\\Codex";
+  assert.equal(resolveTelegramUploadCwd("C:\\WINDOWS\\system32", fallback), fallback);
+  assert.equal(
+    resolveTelegramUploadCwd("C:\\Users\\lelik\\Documents\\Codex\\Bridge8", fallback),
+    "C:\\Users\\lelik\\Documents\\Codex\\Bridge8",
   );
 });
 
