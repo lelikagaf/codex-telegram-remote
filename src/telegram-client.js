@@ -1,5 +1,16 @@
 const { EventEmitter } = require("node:events");
+const fs = require("node:fs");
+const path = require("node:path");
 const { splitText } = require("./format");
+
+class TelegramFileTooLargeError extends Error {
+  constructor(actualBytes, limitBytes) {
+    super(`Размер файла ${actualBytes} байт превышает лимит ${limitBytes} байт.`);
+    this.name = "TelegramFileTooLargeError";
+    this.actualBytes = actualBytes;
+    this.limitBytes = limitBytes;
+  }
+}
 
 class TelegramApiError extends Error {
   constructor(method, description, errorCode) {
@@ -14,6 +25,7 @@ class TelegramClient extends EventEmitter {
   constructor({ token, logger, pollTimeoutSeconds = 45, resumeGapMs = 120000 }) {
     super();
     this.baseUrl = `https://api.telegram.org/bot${token}`;
+    this.fileBaseUrl = `https://api.telegram.org/file/bot${token}`;
     this.logger = logger;
     this.pollTimeoutSeconds = pollTimeoutSeconds;
     this.resumeGapMs = resumeGapMs;
@@ -42,6 +54,72 @@ class TelegramClient extends EventEmitter {
 
   getMe() {
     return this.call("getMe");
+  }
+
+  getFile(fileId) {
+    return this.call("getFile", { file_id: fileId });
+  }
+
+  async downloadFile(fileId, destinationPath, { maxBytes = 0, timeoutMs = 600000 } = {}) {
+    const file = await this.getFile(fileId);
+    if (!file?.file_path) throw new Error("Telegram getFile не вернул путь к документу.");
+    if (maxBytes > 0 && Number(file.file_size) > maxBytes) {
+      throw new TelegramFileTooLargeError(Number(file.file_size), maxBytes);
+    }
+
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    const temporaryPath = `${destinationPath}.${process.pid}.${Date.now()}.part`;
+    let handle = null;
+    let totalBytes = 0;
+
+    try {
+      const response = await fetch(`${this.fileBaseUrl}/${file.file_path}`, {
+        signal: controller.signal,
+      });
+      if (!response.ok || !response.body) {
+        throw new Error(`Telegram не отдал документ: HTTP ${response.status}.`);
+      }
+
+      const contentLength = Number(response.headers.get("content-length"));
+      if (maxBytes > 0 && Number.isFinite(contentLength) && contentLength > maxBytes) {
+        throw new TelegramFileTooLargeError(contentLength, maxBytes);
+      }
+
+      await fs.promises.mkdir(path.dirname(destinationPath), { recursive: true });
+      handle = await fs.promises.open(temporaryPath, "wx");
+      const reader = response.body.getReader();
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        totalBytes += value.byteLength;
+        if (maxBytes > 0 && totalBytes > maxBytes) {
+          controller.abort();
+          throw new TelegramFileTooLargeError(totalBytes, maxBytes);
+        }
+        let offset = 0;
+        while (offset < value.byteLength) {
+          const { bytesWritten } = await handle.write(
+            value,
+            offset,
+            value.byteLength - offset,
+            null,
+          );
+          if (!bytesWritten) throw new Error("Не удалось записать полученный документ на диск.");
+          offset += bytesWritten;
+        }
+      }
+      await handle.close();
+      handle = null;
+      await fs.promises.rename(temporaryPath, destinationPath);
+      return { path: destinationPath, size: totalBytes };
+    } catch (error) {
+      if (handle) await handle.close().catch(() => {});
+      await fs.promises.rm(temporaryPath, { force: true }).catch(() => {});
+      throw error;
+    } finally {
+      clearTimeout(timer);
+    }
   }
 
   deleteWebhook() {
@@ -138,4 +216,4 @@ class TelegramClient extends EventEmitter {
   }
 }
 
-module.exports = { TelegramApiError, TelegramClient };
+module.exports = { TelegramApiError, TelegramClient, TelegramFileTooLargeError };

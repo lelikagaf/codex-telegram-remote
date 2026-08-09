@@ -49,6 +49,26 @@ function parseApprovalPolicy(value) {
   throw error;
 }
 
+function parseFileSizeLimitMb(value, fallback = 0) {
+  const raw = value === undefined || String(value).trim() === "" ? fallback : Number(value);
+  if (!Number.isFinite(raw) || raw < -1 || (raw < 0 && raw !== -1)) {
+    const error = new Error(
+      "TELEGRAM_MAX_FILE_SIZE_MB должен быть положительным числом, 0 или -1.",
+    );
+    error.exitCode = 78;
+    throw error;
+  }
+  if (raw === 0 || raw === -1) return 0;
+
+  const bytes = Math.floor(raw * 1024 * 1024);
+  if (!Number.isSafeInteger(bytes) || bytes < 1) {
+    const error = new Error("TELEGRAM_MAX_FILE_SIZE_MB выходит за допустимый диапазон.");
+    error.exitCode = 78;
+    throw error;
+  }
+  return bytes;
+}
+
 function loadConfig(projectRoot) {
   loadEnvFile(path.join(projectRoot, ".env"));
 
@@ -82,6 +102,7 @@ function loadConfig(projectRoot) {
     defaultCwd,
     notifyOnStart: parseBoolean(process.env.TELEGRAM_NOTIFY_ON_START, true),
     notifyAfterSleep: parseBoolean(process.env.TELEGRAM_NOTIFY_AFTER_SLEEP, false),
+    telegramMaxFileBytes: parseFileSizeLimitMb(process.env.TELEGRAM_MAX_FILE_SIZE_MB, 0),
     resumeGapMs:
       Math.max(30, Number(process.env.RESUME_NOTIFICATION_GAP_SECONDS) || 120) * 1000,
     desktopSyncPollMs:
@@ -92,4 +113,11 @@ function loadConfig(projectRoot) {
   };
 }
 
-module.exports = { loadConfig, loadEnvFile, parseApprovalPolicy, parseBoolean, parseEnv };
+module.exports = {
+  loadConfig,
+  loadEnvFile,
+  parseApprovalPolicy,
+  parseBoolean,
+  parseEnv,
+  parseFileSizeLimitMb,
+};

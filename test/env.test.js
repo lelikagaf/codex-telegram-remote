@@ -1,6 +1,11 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const { parseApprovalPolicy, parseBoolean, parseEnv } = require("../src/env");
+const {
+  parseApprovalPolicy,
+  parseBoolean,
+  parseEnv,
+  parseFileSizeLimitMb,
+} = require("../src/env");
 
 test("parseEnv читает значения и кавычки", () => {
   assert.deepEqual(parseEnv('A=one\nB="two words"\n# C=skip\n'), {
@@ -23,4 +28,16 @@ test("parseApprovalPolicy принимает известные режимы", (
 
 test("parseApprovalPolicy отклоняет неизвестный режим", () => {
   assert.throws(() => parseApprovalPolicy("always"), /CODEX_APPROVAL_POLICY/);
+});
+
+test("лимит файла принимает мегабайты, 0 и -1", () => {
+  assert.equal(parseFileSizeLimitMb("25"), 25 * 1024 * 1024);
+  assert.equal(parseFileSizeLimitMb("0"), 0);
+  assert.equal(parseFileSizeLimitMb("-1"), 0);
+  assert.equal(parseFileSizeLimitMb(undefined), 0);
+});
+
+test("лимит файла отклоняет остальные отрицательные и некорректные значения", () => {
+  assert.throws(() => parseFileSizeLimitMb("-2"), /TELEGRAM_MAX_FILE_SIZE_MB/);
+  assert.throws(() => parseFileSizeLimitMb("много"), /TELEGRAM_MAX_FILE_SIZE_MB/);
 });

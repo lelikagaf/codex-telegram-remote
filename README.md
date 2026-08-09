@@ -14,6 +14,8 @@
 - `/use N` — выбор чата по номеру;
 - `/new Название` — создание нового чата;
 - обычное сообщение — новая задача в выбранном чате;
+- Telegram-документ — загрузка в `.codex-telegram-uploads` выбранного рабочего
+  каталога и передача Codex вместе с подписью пользователя;
 - `/status`, `/stop`, `/steer текст` — управление выполняющейся задачей;
 - `/approve` и `/deny` — ответы на запросы разрешения Codex;
 - потоковое обновление ответа в Telegram;
@@ -96,6 +98,7 @@ CODEX_BINARY=
 CODEX_APPROVAL_POLICY=never
 TELEGRAM_NOTIFY_ON_START=true
 TELEGRAM_NOTIFY_AFTER_SLEEP=false
+TELEGRAM_MAX_FILE_SIZE_MB=0
 RESUME_NOTIFICATION_GAP_SECONDS=120
 DESKTOP_SYNC_POLL_SECONDS=3
 LOG_LEVEL=info
@@ -107,6 +110,9 @@ LOG_LEVEL=info
 `CODEX_APPROVAL_POLICY=never` отключает запросы `/approve` от Codex: действия,
 которым не хватает разрешений, будут возвращаться агенту как ошибка. Для более
 строгого ручного контроля можно указать `on-request` или `untrusted`.
+`TELEGRAM_MAX_FILE_SIZE_MB` задаёт максимальный размер загружаемого документа в
+мегабайтах. Значения `0` и `-1` отключают ограничение со стороны бота. При этом
+могут сохраняться собственные технические ограничения Telegram Bot API.
 
 Запуск:
 
@@ -162,6 +168,8 @@ powershell -ExecutionPolicy Bypass -File .\scripts\uninstall-autostart.ps1
 - Бот получает доступ к тем же файлам, что и вошедший пользователь Windows.
 - Не запускайте весь бот с постоянными правами администратора.
 - Не храните рабочий экземпляр на общедоступном сетевом диске.
+- Имена документов очищаются от путей и недопустимых для Windows символов;
+  неполные загрузки удаляются.
 
 Файлы `.env`, `data/state.json` и `logs/bot.log` исключены через `.gitignore`.
 

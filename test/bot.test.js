@@ -4,6 +4,7 @@ const { EventEmitter } = require("node:events");
 const {
   CodexTelegramBot,
   appendPendingTelegramFinal,
+  buildDocumentPrompt,
   extractAgentText,
   extractTurnAnswer,
   extractTurnUserMessages,
@@ -17,6 +18,8 @@ const {
   isThreadBusy,
   isUnmaterializedThreadError,
   isUserMessage,
+  nextTelegramUploadPath,
+  sanitizeTelegramFileName,
   shouldWaitForTurnAnswer,
   unseenSyncTurns,
   unseenTerminalTurns,
@@ -74,6 +77,29 @@ test("извлекается текст из content", () => {
     extractAgentText({ content: [{ type: "output_text", text: "Раз" }, { text: "Два" }] }),
     "Раз\nДва",
   );
+});
+
+test("имя Telegram-документа очищается от пути и недопустимых символов", () => {
+  assert.equal(sanitizeTelegramFileName("../../bad:name?.md"), "bad_name_.md");
+  assert.equal(sanitizeTelegramFileName("CON.txt"), "_CON.txt");
+  assert.equal(sanitizeTelegramFileName("..."), "document");
+  assert.match(
+    nextTelegramUploadPath("C:\\Project", "file.md", 10),
+    /\.codex-telegram-uploads[\\/]10-file\.md$/,
+  );
+});
+
+test("prompt документа содержит локальный путь и подпись пользователя", () => {
+  const prompt = buildDocumentPrompt({
+    localPath: "C:\\Project\\.codex-telegram-uploads\\10-file.md",
+    fileName: "file.md",
+    mimeType: "text/markdown",
+    size: 42,
+    caption: "Положи в docs и прочитай.",
+  });
+  assert.match(prompt, /10-file\.md/);
+  assert.match(prompt, /Положи в docs и прочитай/);
+  assert.match(prompt, /42 байт/);
 });
 
 test("активный чат считается занятым", () => {
@@ -356,6 +382,105 @@ test("распознаётся ошибка ещё не материализов
     true,
   );
   assert.equal(isUnmaterializedThreadError(new Error("other failure")), false);
+});
+
+test("Telegram-документ скачивается без лимита и передаётся Codex вместе с подписью", async () => {
+  const sent = [];
+  const edits = [];
+  const downloads = [];
+  const telegram = new EventEmitter();
+  telegram.sendMessage = async (chatId, text) => {
+    sent.push({ chatId, text });
+    return { message_id: sent.length };
+  };
+  telegram.editMessage = async (chatId, messageId, text) => {
+    edits.push({ chatId, messageId, text });
+  };
+  telegram.downloadFile = async (fileId, destinationPath, options) => {
+    downloads.push({ fileId, destinationPath, options });
+    return { path: destinationPath, size: 8600 };
+  };
+
+  let prompt = null;
+  const codex = new EventEmitter();
+  codex.resumeThread = async () => {};
+  codex.readThread = async () => ({
+    thread: { cwd: "C:\\Project", status: { type: "idle" }, turns: [] },
+  });
+  codex.listTurns = async () => ({ data: [] });
+  codex.startTurn = async (_threadId, text) => {
+    prompt = text;
+    return { turn: { id: "document-turn" } };
+  };
+
+  const bot = new CodexTelegramBot({
+    telegram,
+    codex,
+    stateStore: createStateStore(),
+    config: {
+      allowedUserId: 7,
+      defaultCwd: "C:\\Project",
+      desktopSyncPollMs: 1000,
+      telegramMaxFileBytes: 0,
+    },
+    logger: createLogger(),
+  });
+
+  await bot.handleUpdate({
+    message: {
+      message_id: 55,
+      from: { id: 7 },
+      chat: { id: 100 },
+      caption: "Положи документ в docs и ознакомься с ним.",
+      document: {
+        file_id: "telegram-file-id",
+        file_name: "Bridge8:Vision?.md",
+        file_size: 8600,
+        mime_type: "text/markdown",
+      },
+    },
+  });
+
+  assert.equal(downloads.length, 1);
+  assert.equal(downloads[0].options.maxBytes, 0);
+  assert.match(downloads[0].destinationPath, /\.codex-telegram-uploads[\\/]55-Bridge8_Vision_\.md$/);
+  assert.match(prompt, /Положи документ в docs/);
+  assert.match(prompt, /55-Bridge8_Vision_\.md/);
+  assert.match(edits[0].text, /без ограничения/);
+  assert.equal(sent.at(-1).text, "⏳ Codex начинает работу…");
+});
+
+test("Telegram-документ больше настроенного лимита отклоняется до скачивания", async () => {
+  const sent = [];
+  let downloadCalls = 0;
+  const telegram = new EventEmitter();
+  telegram.sendMessage = async (chatId, text) => {
+    sent.push({ chatId, text });
+    return { message_id: 1 };
+  };
+  telegram.downloadFile = async () => {
+    downloadCalls += 1;
+  };
+
+  const bot = new CodexTelegramBot({
+    telegram,
+    codex: new EventEmitter(),
+    stateStore: createStateStore(),
+    config: { allowedUserId: 7, desktopSyncPollMs: 1000, telegramMaxFileBytes: 1024 },
+    logger: createLogger(),
+  });
+
+  await bot.handleUpdate({
+    message: {
+      message_id: 56,
+      from: { id: 7 },
+      chat: { id: 100 },
+      document: { file_id: "large-file", file_name: "large.bin", file_size: 1025 },
+    },
+  });
+
+  assert.equal(downloadCalls, 0);
+  assert.match(sent.at(-1).text, /больше разрешённого лимита/);
 });
 
 test("пропущенный финал Telegram повторно доставляется фоновым опросом", async () => {
