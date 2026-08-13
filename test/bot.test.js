@@ -432,6 +432,7 @@ test("Telegram-документ скачивается без лимита и п
       defaultCwd: "C:\\Project",
       desktopSyncPollMs: 1000,
       telegramMaxFileBytes: 0,
+      documentBatchSettleMs: 1,
     },
     logger: createLogger(),
   });
@@ -450,6 +451,7 @@ test("Telegram-документ скачивается без лимита и п
       },
     },
   });
+  await waitFor(() => downloads.length === 1);
 
   assert.equal(downloads.length, 1);
   assert.equal(downloads[0].options.maxBytes, 0);
@@ -476,7 +478,12 @@ test("Telegram-документ больше настроенного лимит
     telegram,
     codex: new EventEmitter(),
     stateStore: createStateStore(),
-    config: { allowedUserId: 7, desktopSyncPollMs: 1000, telegramMaxFileBytes: 1024 },
+    config: {
+      allowedUserId: 7,
+      desktopSyncPollMs: 1000,
+      telegramMaxFileBytes: 1024,
+      documentBatchSettleMs: 1,
+    },
     logger: createLogger(),
   });
 
@@ -488,6 +495,7 @@ test("Telegram-документ больше настроенного лимит
       document: { file_id: "large-file", file_name: "large.bin", file_size: 1025 },
     },
   });
+  await waitFor(() => sent.length > 0);
 
   assert.equal(downloadCalls, 0);
   assert.match(sent.at(-1).text, /больше разрешённого лимита/);
@@ -568,4 +576,74 @@ test("обновление не пересылает заново старые T
 
   assert.deepEqual(stateStore.state.telegramFinalDeliveredTurnIds, ["old-turn"]);
   assert.deepEqual(sent, []);
+});
+
+test("Telegram documents from one media group are sent to Codex as one turn", async () => {
+  const sent = [];
+  const downloads = [];
+  const telegram = new EventEmitter();
+  telegram.sendMessage = async (chatId, text) => {
+    sent.push({ chatId, text });
+    return { message_id: sent.length };
+  };
+  telegram.editMessage = async () => {};
+  telegram.downloadFile = async (fileId, destinationPath, options) => {
+    downloads.push({ fileId, destinationPath, options });
+    return { path: destinationPath, size: fileId === "file-a" ? 100 : 200 };
+  };
+
+  const prompts = [];
+  const codex = new EventEmitter();
+  codex.resumeThread = async () => {};
+  codex.readThread = async () => ({
+    thread: { cwd: "C:\\Project", status: { type: "idle" }, turns: [] },
+  });
+  codex.listTurns = async () => ({ data: [] });
+  codex.startTurn = async (_threadId, text) => {
+    prompts.push(text);
+    return { turn: { id: `document-turn-${prompts.length}` } };
+  };
+
+  const bot = new CodexTelegramBot({
+    telegram,
+    codex,
+    stateStore: createStateStore(),
+    config: {
+      allowedUserId: 7,
+      defaultCwd: "C:\\Project",
+      desktopSyncPollMs: 1000,
+      telegramMaxFileBytes: 0,
+      documentBatchSettleMs: 1,
+    },
+    logger: createLogger(),
+  });
+
+  await bot.handleUpdate({
+    message: {
+      message_id: 61,
+      media_group_id: "album-1",
+      from: { id: 7 },
+      chat: { id: 100 },
+      caption: "Use both files.",
+      document: { file_id: "file-a", file_name: "a.md", file_size: 100 },
+    },
+  });
+  await bot.handleUpdate({
+    message: {
+      message_id: 62,
+      media_group_id: "album-1",
+      from: { id: 7 },
+      chat: { id: 100 },
+      document: { file_id: "file-b", file_name: "b.md", file_size: 200 },
+    },
+  });
+
+  await waitFor(() => prompts.length === 1);
+
+  assert.equal(downloads.length, 2);
+  assert.equal(prompts.length, 1);
+  assert.match(prompts[0], /61-a\.md/);
+  assert.match(prompts[0], /62-b\.md/);
+  assert.match(prompts[0], /Use both files/);
+  assert.match(sent.at(-1).text, /Codex/);
 });
