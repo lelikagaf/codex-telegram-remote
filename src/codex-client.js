@@ -2,6 +2,19 @@ const { EventEmitter } = require("node:events");
 const { spawn } = require("node:child_process");
 const readline = require("node:readline");
 
+function buildCodexAppServerArgs({ argsPrefix = [], approvalPolicy = "never", cwd }) {
+  const args = [
+    ...argsPrefix,
+    "--ask-for-approval",
+    approvalPolicy,
+  ];
+  if (cwd) {
+    args.push("--add-dir", cwd);
+  }
+  args.push("app-server", "--stdio");
+  return args;
+}
+
 class CodexRpcError extends Error {
   constructor(method, rpcError) {
     super(`${method}: ${rpcError?.message || "ошибка Codex app-server"}`);
@@ -48,13 +61,11 @@ class CodexClient extends EventEmitter {
     this.loadedThreads.clear();
     this.child = spawn(
       this.launch.command,
-      [
-        ...this.launch.argsPrefix,
-        "--ask-for-approval",
-        this.approvalPolicy,
-        "app-server",
-        "--stdio",
-      ],
+      buildCodexAppServerArgs({
+        argsPrefix: this.launch.argsPrefix,
+        approvalPolicy: this.approvalPolicy,
+        cwd: this.cwd,
+      }),
       {
         cwd: this.cwd,
         env: process.env,
@@ -250,4 +261,4 @@ class CodexClient extends EventEmitter {
   }
 }
 
-module.exports = { CodexClient, CodexRpcError };
+module.exports = { CodexClient, CodexRpcError, buildCodexAppServerArgs };
