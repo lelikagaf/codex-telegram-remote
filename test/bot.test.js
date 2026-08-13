@@ -1,10 +1,14 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const { EventEmitter } = require("node:events");
+const fs = require("node:fs");
+const os = require("node:os");
+const path = require("node:path");
 const {
   CodexTelegramBot,
   appendPendingTelegramFinal,
   buildDocumentPrompt,
+  collectOutgoingTelegramFiles,
   extractAgentText,
   extractTurnAnswer,
   extractTurnUserMessages,
@@ -646,4 +650,96 @@ test("Telegram documents from one media group are sent to Codex as one turn", as
   assert.match(prompts[0], /62-b\.md/);
   assert.match(prompts[0], /Use both files/);
   assert.match(sent.at(-1).text, /Codex/);
+});
+
+test("collectOutgoingTelegramFiles returns multiple safe files from allowed root", (t) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "codex-telegram-out-"));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+
+  const first = path.join(directory, "first.md");
+  const second = path.join(directory, "second.txt");
+  const secret = path.join(directory, ".env");
+  const logDirectory = path.join(directory, "logs");
+  fs.writeFileSync(first, "first");
+  fs.writeFileSync(second, "second");
+  fs.writeFileSync(secret, "token");
+  fs.mkdirSync(logDirectory);
+  fs.writeFileSync(path.join(logDirectory, "result.txt"), "log");
+
+  assert.deepEqual(
+    collectOutgoingTelegramFiles(
+      [
+        `Created: ${first}`,
+        `Created: ${second}`,
+        `Secret: ${secret}`,
+        `Log: ${path.join(logDirectory, "result.txt")}`,
+      ].join("\n"),
+      { roots: [directory] },
+    ),
+    [first, second].map((filePath) => path.resolve(filePath)),
+  );
+});
+
+test("Telegram final sends multiple referenced files as documents", async (t) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "codex-telegram-final-files-"));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const first = path.join(directory, "one.md");
+  const second = path.join(directory, "two.md");
+  fs.writeFileSync(first, "one");
+  fs.writeFileSync(second, "two");
+
+  const sentDocuments = [];
+  const telegram = new EventEmitter();
+  telegram.sendMessage = async () => ({ message_id: 10 });
+  telegram.sendLongMessage = async () => [{ message_id: 11 }];
+  telegram.editMessage = async () => {};
+  telegram.sendDocument = async (chatId, filePath) => {
+    sentDocuments.push({ chatId, filePath });
+    return { message_id: 20 + sentDocuments.length };
+  };
+
+  const codex = new EventEmitter();
+  codex.resumeThread = async () => {};
+  codex.readThread = async () => ({ thread: { status: { type: "idle" }, turns: [] } });
+  codex.listTurns = async () => ({ data: [] });
+  codex.startTurn = async () => ({ turn: { id: "turn-files" } });
+
+  const stateStore = createStateStore();
+  const bot = new CodexTelegramBot({
+    telegram,
+    codex,
+    stateStore,
+    config: { allowedUserId: 7, defaultCwd: directory, desktopSyncPollMs: 1000 },
+    logger: createLogger(),
+  });
+
+  await bot.handleUpdate({
+    message: { from: { id: 7 }, chat: { id: 100 }, text: "Make files" },
+  });
+  codex.emit("notification", {
+    method: "item/completed",
+    params: {
+      threadId: "thread-1",
+      turnId: "turn-files",
+      item: {
+        id: "answer-files",
+        type: "agentMessage",
+        phase: "final_answer",
+        text: `Files:\n${first}\n${second}`,
+      },
+    },
+  });
+  codex.emit("notification", {
+    method: "turn/completed",
+    params: { turn: { id: "turn-files", threadId: "thread-1", status: "completed" } },
+  });
+
+  await waitFor(() => stateStore.state.telegramFinalDeliveredTurnIds.includes("turn-files"));
+  assert.deepEqual(
+    sentDocuments.map((item) => [item.chatId, path.resolve(item.filePath)]),
+    [
+      [100, path.resolve(first)],
+      [100, path.resolve(second)],
+    ],
+  );
 });

@@ -164,6 +164,33 @@ class TelegramClient extends EventEmitter {
     return messages;
   }
 
+  async sendDocument(chatId, filePath, extra = {}, timeoutMs = 600000) {
+    const form = new FormData();
+    const buffer = await fs.promises.readFile(filePath);
+    form.set("chat_id", String(chatId));
+    form.set("document", new Blob([buffer]), path.basename(filePath));
+    for (const [key, value] of Object.entries(extra || {})) {
+      if (value !== undefined && value !== null) form.set(key, String(value));
+    }
+
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const response = await fetch(`${this.baseUrl}/sendDocument`, {
+        method: "POST",
+        body: form,
+        signal: controller.signal,
+      });
+      const data = await response.json();
+      if (!response.ok || !data.ok) {
+        throw new TelegramApiError("sendDocument", data.description, data.error_code);
+      }
+      return data.result;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
   stop() {
     this.running = false;
   }
