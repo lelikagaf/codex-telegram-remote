@@ -4,6 +4,7 @@ const { discoverCodexBinary } = require("./codex-binary");
 const { CodexClient } = require("./codex-client");
 const { loadConfig } = require("./env");
 const { createLogger } = require("./logger");
+const { ReleaseTracker, formatReleaseEntry, recordReleaseStart } = require("./release-notes");
 const { StateStore } = require("./state-store");
 const { TelegramClient } = require("./telegram-client");
 
@@ -53,6 +54,11 @@ async function main() {
   }
 
   const launch = discoverCodexBinary({ explicitPath: config.codexBinary, logger });
+  const release = recordReleaseStart({
+    logPath: config.releaseLogPath,
+    codexVersion: launch.version.raw,
+  });
+  const releaseTracker = new ReleaseTracker({ logPath: config.releaseLogPath });
   telegram = new TelegramClient({
     token: config.token,
     logger,
@@ -64,7 +70,7 @@ async function main() {
     approvalPolicy: config.codexApprovalPolicy,
     logger,
   });
-  bot = new CodexTelegramBot({ telegram, codex, stateStore, config, logger });
+  bot = new CodexTelegramBot({ telegram, codex, stateStore, config, logger, releaseTracker });
 
   await bot.initialize();
   const me = await telegram.getMe();
@@ -74,6 +80,13 @@ async function main() {
     await telegram.sendMessage(
       stateStore.state.lastChatId,
       `🟢 Бот запущен. Codex ${launch.version.raw} готов к работе.`,
+    );
+  }
+
+  if (config.notifyOnStart && stateStore.state.lastChatId) {
+    await telegram.sendMessage(
+      stateStore.state.lastChatId,
+      formatReleaseEntry(release.entry),
     );
   }
 

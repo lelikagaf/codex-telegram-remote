@@ -110,6 +110,7 @@ function loadConfig(projectRoot) {
     logLevel: (process.env.LOG_LEVEL || "info").toLowerCase(),
     statePath: path.join(projectRoot, "data", "state.json"),
     logPath: path.join(projectRoot, "logs", "bot.log"),
+    releaseLogPath: path.join(projectRoot, "data", "releases.jsonl"),
   };
 }
 

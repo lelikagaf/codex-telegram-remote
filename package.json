@@ -6,7 +6,7 @@
   "type": "commonjs",
   "scripts": {
     "start": "node src/index.js",
-    "check": "node --check src/index.js && node --check src/bot.js && node --check src/codex-client.js && node --check src/telegram-client.js",
+    "check": "node --check src/index.js && node --check src/bot.js && node --check src/codex-client.js && node --check src/telegram-client.js && node --check src/app-release.js && node --check src/release-notes.js",
     "test": "node --test",
     "diagnose": "node scripts/diagnose-codex.js"
   },

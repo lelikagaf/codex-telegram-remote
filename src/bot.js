@@ -39,6 +39,8 @@ const HELP_TEXT = [
   "",
   "Обычный текст отправляется в выбранный чат Codex.",
   "Документ скачивается в выбранный рабочий каталог и передаётся Codex вместе с подписью.",
+  "/release 1 — release notes последнего запуска",
+  "/releases — история запусков и версий",
 ].join("\n");
 
 function extractAgentText(item) {
@@ -356,13 +358,14 @@ function formatTelegramTurnResult(turn, text) {
 }
 
 class CodexTelegramBot {
-  constructor({ telegram, codex, stateStore, config, logger }) {
+  constructor({ telegram, codex, stateStore, config, logger, releaseTracker = null }) {
     this.telegram = telegram;
     this.codex = codex;
     this.stateStore = stateStore;
     this.state = stateStore.state;
     this.config = config;
     this.logger = logger;
+    this.releaseTracker = releaseTracker;
     this.lastThreads = [];
     this.activeByThread = new Map();
     this.activeByTurn = new Map();
@@ -406,6 +409,8 @@ class CodexTelegramBot {
       { command: "approve", description: "Разрешить действие" },
       { command: "deny", description: "Отклонить действие" },
       { command: "help", description: "Справка" },
+      { command: "release", description: "Release notes" },
+      { command: "releases", description: "Release history" },
     ]);
     await this.codex.ensureStarted();
     try {
@@ -525,6 +530,12 @@ class CodexTelegramBot {
         break;
       case "/deny":
         await this.#resolveApproval(chatId, false);
+        break;
+      case "/release":
+        await this.#showRelease(chatId, argument);
+        break;
+      case "/releases":
+        await this.#showReleases(chatId, argument);
         break;
       default:
         await this.telegram.sendMessage(chatId, `Неизвестная команда.\n\n${HELP_TEXT}`);
@@ -1074,6 +1085,23 @@ class CodexTelegramBot {
     } finally {
       this.desktopSyncRunning = false;
     }
+  }
+
+  async #showRelease(chatId, argument) {
+    if (!this.releaseTracker) {
+      await this.telegram.sendMessage(chatId, "Release notes недоступны.");
+      return;
+    }
+    await this.telegram.sendLongMessage(chatId, this.releaseTracker.format(argument || 1));
+  }
+
+  async #showReleases(chatId, argument) {
+    if (!this.releaseTracker) {
+      await this.telegram.sendMessage(chatId, "История релизов недоступна.");
+      return;
+    }
+    const limit = Math.min(30, Math.max(1, Number(argument) || 10));
+    await this.telegram.sendLongMessage(chatId, this.releaseTracker.formatHistory(limit));
   }
 
   async #showStatus(chatId) {
