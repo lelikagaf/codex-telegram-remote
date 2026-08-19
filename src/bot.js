@@ -5,7 +5,6 @@ const { redact } = require("./logger");
 const { TelegramFileTooLargeError } = require("./telegram-client");
 
 const DESKTOP_TURN_SETTLE_MS = 6000;
-const DOCUMENT_BATCH_SETTLE_MS = 1200;
 const INCOMING_MESSAGE_SETTLE_MS = 8000;
 const TELEGRAM_OUTGOING_FILE_LIMIT_BYTES = 50 * 1024 * 1024;
 const TELEGRAM_OUTGOING_FILE_LIMIT_COUNT = 10;
@@ -496,10 +495,7 @@ class CodexTelegramBot {
     this.desktopSyncSuspended = false;
     this.telegramFinalDeliveryPromises = new Map();
     this.documentBatches = new Map();
-    this.documentBatchSettleMs = Number(config.documentBatchSettleMs) || DOCUMENT_BATCH_SETTLE_MS;
-    this.incomingMessageSettleMs = Number(config.incomingMessageSettleMs) ||
-      Number(config.looseDocumentBatchSettleMs) ||
-      INCOMING_MESSAGE_SETTLE_MS;
+    this.incomingMessageSettleMs = Number(config.incomingMessageSettleMs) || INCOMING_MESSAGE_SETTLE_MS;
     this.pendingPromptQueues = new Map();
     this.drainingPromptThreads = new Set();
 
@@ -691,12 +687,11 @@ class CodexTelegramBot {
     }
     batch.messages.push(message);
     if (batch.timer) clearTimeout(batch.timer);
-    const settleMs = message.media_group_id ? this.documentBatchSettleMs : this.incomingMessageSettleMs;
     batch.timer = setTimeout(() => {
       this.#flushDocumentBatch(key).catch((error) =>
         this.logger.error("Ошибка обработки входящей посылки Telegram", error.stack || error.message),
       );
-    }, settleMs);
+    }, this.incomingMessageSettleMs);
     batch.timer.unref?.();
   }
 
@@ -809,86 +804,6 @@ class CodexTelegramBot {
       await this.telegram.sendMessage(
         chatId,
         `❌ Документы сохранены, но Codex не принял задачу. Повторите команду позже.\n${downloadedDocuments.map((item) => item.localPath).join("\n")}`,
-      );
-    }
-  }
-
-  async #handleDocument(chatId, message) {
-    const threadId = this.state.currentThreadId;
-    if (!threadId) {
-      await this.telegram.sendMessage(chatId, "Сначала выбери чат командой /chats.");
-      return;
-    }
-
-    const document = message.document;
-    const maxBytes = this.config.telegramMaxFileBytes || 0;
-    const declaredSize = Number(document.file_size) || 0;
-    if (maxBytes > 0 && declaredSize > maxBytes) {
-      await this.telegram.sendMessage(
-        chatId,
-        `❌ Документ больше разрешённого лимита ${formatFileSizeLimit(maxBytes)}.`,
-      );
-      return;
-    }
-
-    const current = await this.codex.readThread(threadId, false);
-    const cwd = resolveTelegramUploadCwd(current.thread?.cwd, this.config.defaultCwd);
-    const destinationPath = nextTelegramUploadPath(
-      cwd,
-      document.file_name,
-      message.message_id,
-    );
-    const progress = await this.telegram.sendMessage(
-      chatId,
-      `⬇️ Скачиваю документ «${sanitizeTelegramFileName(document.file_name)}»…`,
-    );
-
-    let downloaded = null;
-    try {
-      downloaded = await this.telegram.downloadFile(document.file_id, destinationPath, {
-        maxBytes,
-      });
-    } catch (error) {
-      const text = error instanceof TelegramFileTooLargeError
-        ? `❌ Документ больше разрешённого лимита ${formatFileSizeLimit(maxBytes)}.`
-        : "❌ Не удалось скачать документ из Telegram. Попробуйте отправить его ещё раз.";
-      this.logger.warn("Не удалось скачать документ Telegram", {
-        fileName: sanitizeTelegramFileName(document.file_name),
-        message: error.message,
-      });
-      await this.telegram.editMessage(chatId, progress.message_id, text);
-      return;
-    }
-
-    try {
-      await this.telegram.editMessage(
-        chatId,
-        progress.message_id,
-        `📎 Документ сохранён и передаётся Codex. Лимит: ${formatFileSizeLimit(maxBytes)}.`,
-      );
-    } catch (error) {
-      this.logger.debug("Не удалось обновить сообщение о загрузке документа", error.message);
-    }
-
-    try {
-      await this.#sendPrompt(
-        chatId,
-        buildDocumentPrompt({
-          localPath: downloaded.path,
-          fileName: document.file_name,
-          mimeType: document.mime_type,
-          size: downloaded.size,
-          caption: message.caption,
-        }),
-      );
-    } catch (error) {
-      this.logger.warn("Документ сохранён, но не передан Codex", {
-        fileName: sanitizeTelegramFileName(document.file_name),
-        message: error.message,
-      });
-      await this.telegram.sendMessage(
-        chatId,
-        `❌ Документ сохранён, но Codex не принял задачу. Повторите команду позже.\n${downloaded.path}`,
       );
     }
   }
@@ -1239,6 +1154,10 @@ class CodexTelegramBot {
         }
         this.#rememberTurn(turn.id);
         this.desktopTurnFirstCompletedAt.delete(turn.id);
+      }
+
+      if (!hasActiveTurn(result.data)) {
+        await this.#drainPromptQueue(threadId);
       }
     } finally {
       this.desktopSyncRunning = false;

@@ -458,6 +458,56 @@ test("Telegram не запускает новый turn, пока Desktop-turn а
   assert.match(sent.at(-1).text, /очередь/);
 });
 
+test("очередь Telegram запускается после завершения активного Desktop-turn", async () => {
+  const sent = [];
+  const telegram = new EventEmitter();
+  telegram.deleteWebhook = async () => {};
+  telegram.setMyCommands = async () => {};
+  telegram.sendMessage = async (chatId, text) => {
+    sent.push({ chatId, text });
+    return { message_id: sent.length };
+  };
+
+  let desktopBusy = true;
+  const prompts = [];
+  const codex = new EventEmitter();
+  codex.ensureStarted = async () => {};
+  codex.resumeThread = async () => {};
+  codex.readThread = async () => ({ thread: { status: { type: "idle" }, turns: [] } });
+  codex.listTurns = async () => ({
+    data: desktopBusy ? [{ id: "desktop-turn", status: "inProgress" }] : [],
+  });
+  codex.startTurn = async (_threadId, text) => {
+    prompts.push(text);
+    return { turn: { id: "telegram-turn" } };
+  };
+
+  const bot = new CodexTelegramBot({
+    telegram,
+    codex,
+    stateStore: createStateStore({
+      desktopSyncThreadId: "thread-1",
+      desktopSyncSeenTurnIds: [],
+    }),
+    config: { allowedUserId: 7, desktopSyncPollMs: 5, incomingMessageSettleMs: 1 },
+    logger: createLogger(),
+  });
+
+  await bot.initialize();
+  await bot.handleUpdate({
+    message: { from: { id: 7 }, chat: { id: 100 }, text: "Запусти после Desktop" },
+  });
+
+  await waitFor(() => sent.some((item) => /очередь/.test(item.text)));
+  assert.equal(prompts.length, 0);
+
+  desktopBusy = false;
+  await waitFor(() => prompts.length === 1);
+  bot.stop();
+
+  assert.equal(prompts[0], "Запусти после Desktop");
+});
+
 test("первое сообщение запускается в ещё не материализованном чате", async () => {
   const sent = [];
   const telegram = new EventEmitter();
@@ -580,8 +630,7 @@ test("Telegram-документ скачивается без лимита и п
       defaultCwd: "C:\\Project",
       desktopSyncPollMs: 1000,
       telegramMaxFileBytes: 0,
-      documentBatchSettleMs: 1,
-      looseDocumentBatchSettleMs: 1,
+      incomingMessageSettleMs: 1,
     },
     logger: createLogger(),
   });
@@ -631,8 +680,7 @@ test("Telegram-документ больше настроенного лимит
       allowedUserId: 7,
       desktopSyncPollMs: 1000,
       telegramMaxFileBytes: 1024,
-      documentBatchSettleMs: 1,
-      looseDocumentBatchSettleMs: 1,
+      incomingMessageSettleMs: 1,
     },
     logger: createLogger(),
   });
@@ -763,7 +811,7 @@ test("Telegram documents from one media group are sent to Codex as one turn", as
       defaultCwd: "C:\\Project",
       desktopSyncPollMs: 1000,
       telegramMaxFileBytes: 0,
-      documentBatchSettleMs: 1,
+      incomingMessageSettleMs: 1,
     },
     logger: createLogger(),
   });
@@ -800,6 +848,70 @@ test("Telegram documents from one media group are sent to Codex as one turn", as
   assert.match(sent.at(-1).text, /Codex/);
 });
 
+test("Telegram document and following text are processed as one incoming batch", async () => {
+  const downloads = [];
+  const telegram = new EventEmitter();
+  telegram.sendMessage = async () => ({ message_id: 10 });
+  telegram.editMessage = async () => {};
+  telegram.downloadFile = async (fileId, destinationPath) => {
+    downloads.push({ fileId, destinationPath });
+    return { path: destinationPath, size: 100 };
+  };
+
+  const prompts = [];
+  const codex = new EventEmitter();
+  codex.resumeThread = async () => {};
+  codex.readThread = async () => ({
+    thread: { cwd: "C:\\Project", status: { type: "idle" }, turns: [] },
+  });
+  codex.listTurns = async () => ({ data: [] });
+  codex.startTurn = async (_threadId, text) => {
+    prompts.push(text);
+    return { turn: { id: "document-turn" } };
+  };
+
+  const bot = new CodexTelegramBot({
+    telegram,
+    codex,
+    stateStore: createStateStore(),
+    config: {
+      allowedUserId: 7,
+      defaultCwd: "C:\\Project",
+      desktopSyncPollMs: 1000,
+      telegramMaxFileBytes: 0,
+      incomingMessageSettleMs: 20,
+    },
+    logger: createLogger(),
+  });
+
+  await bot.handleUpdate({
+    message: {
+      message_id: 71,
+      media_group_id: "album-with-text",
+      from: { id: 7 },
+      chat: { id: 100 },
+      document: { file_id: "file-a", file_name: "a.md", file_size: 100 },
+    },
+  });
+
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  await bot.handleUpdate({
+    message: {
+      message_id: 72,
+      from: { id: 7 },
+      chat: { id: 100 },
+      text: "Прочитай именно как UTF-8 и дай сводку.",
+    },
+  });
+
+  await waitFor(() => prompts.length === 1);
+
+  assert.equal(downloads.length, 1);
+  assert.match(prompts[0], /одну составную посылку/);
+  assert.match(prompts[0], /71-a\.md/);
+  assert.match(prompts[0], /Прочитай именно как UTF-8/);
+});
+
 test("Telegram loose documents are batched into one Codex turn", async () => {
   const downloads = [];
   const telegram = new EventEmitter();
@@ -831,7 +943,7 @@ test("Telegram loose documents are batched into one Codex turn", async () => {
       defaultCwd: "C:\\Project",
       desktopSyncPollMs: 1000,
       telegramMaxFileBytes: 0,
-      looseDocumentBatchSettleMs: 5,
+      incomingMessageSettleMs: 5,
     },
     logger: createLogger(),
   });
@@ -897,7 +1009,7 @@ test("Telegram document batch waits in queue while Codex turn is active", async 
       defaultCwd: "C:\\Project",
       desktopSyncPollMs: 1000,
       telegramMaxFileBytes: 0,
-      looseDocumentBatchSettleMs: 5,
+      incomingMessageSettleMs: 5,
     },
     logger: createLogger(),
   });

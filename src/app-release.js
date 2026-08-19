@@ -65,6 +65,18 @@ const RELEASE_HISTORY = [
       "Processing starts only after the full batch is accepted and stored.",
     ],
   },
+  {
+    id: "2026-08-19-unified-intake-quiet-period",
+    version: "0.1.7",
+    sequence: 7,
+    title: "Unified intake quiet period",
+    notes: [
+      "All non-command Telegram text and document updates now use the same quiet period.",
+      "A document followed by a text instruction is kept in one incoming batch before processing.",
+      "Queued Telegram work starts after an external Desktop turn becomes idle.",
+      "Removed the obsolete direct single-document handling path.",
+    ],
+  },
 ];
 
 const CURRENT_RELEASE = RELEASE_HISTORY.at(-1);
