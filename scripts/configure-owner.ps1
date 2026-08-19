@@ -135,16 +135,28 @@ $utf8WithoutBom = New-Object System.Text.UTF8Encoding($false)
 
 # Restrict the plaintext token file to the current Windows account.
 $identity = [System.Security.Principal.WindowsIdentity]::GetCurrent()
-$acl = New-Object System.Security.AccessControl.FileSecurity
-$acl.SetOwner($identity.User)
-$acl.SetAccessRuleProtection($true, $false)
-$accessRule = [System.Security.AccessControl.FileSystemAccessRule]::new(
-    $identity.User,
-    [System.Security.AccessControl.FileSystemRights]::FullControl,
-    [System.Security.AccessControl.AccessControlType]::Allow
-)
-$acl.AddAccessRule($accessRule)
-Set-Acl -LiteralPath $envPath -AclObject $acl
+try {
+    $acl = New-Object System.Security.AccessControl.FileSecurity
+    $acl.SetOwner($identity.User)
+    $acl.SetAccessRuleProtection($true, $false)
+    $accessRule = [System.Security.AccessControl.FileSystemAccessRule]::new(
+        $identity.User,
+        [System.Security.AccessControl.FileSystemRights]::FullControl,
+        [System.Security.AccessControl.AccessControlType]::Allow
+    )
+    $acl.AddAccessRule($accessRule)
+    Set-Acl -LiteralPath $envPath -AclObject $acl
+}
+catch {
+    # Some Windows PowerShell installations cannot autoload
+    # Microsoft.PowerShell.Security. icacls is available on supported Windows
+    # versions and accepts the current account SID without localized names.
+    $icacls = Join-Path $env:SystemRoot 'System32\icacls.exe'
+    & $icacls $envPath '/inheritance:r' '/grant:r' "*$($identity.User.Value):(F)" | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        throw 'Failed to restrict access to .env with Set-Acl and icacls.'
+    }
+}
 
 Invoke-TelegramApi -Method 'sendMessage' -Payload @{
     chat_id = $ownerMessage.chat.id
