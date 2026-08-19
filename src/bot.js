@@ -473,6 +473,8 @@ class CodexTelegramBot {
     this.documentBatches = new Map();
     this.documentBatchSettleMs = Number(config.documentBatchSettleMs) || DOCUMENT_BATCH_SETTLE_MS;
     this.looseDocumentBatchSettleMs = Number(config.looseDocumentBatchSettleMs) || LOOSE_DOCUMENT_BATCH_SETTLE_MS;
+    this.pendingPromptQueues = new Map();
+    this.drainingPromptThreads = new Set();
 
     this.codex.on("notification", (message) => {
       this.#onCodexNotification(message).catch((error) =>
@@ -746,15 +748,21 @@ class CodexTelegramBot {
         chatId,
         progress.message_id,
         items.length === 1
-          ? `📎 Документ сохранён и передаётся Codex. Лимит: ${formatFileSizeLimit(maxBytes)}.`
-          : `📎 Документы сохранены и передаются Codex: ${items.length}. Лимит: ${formatFileSizeLimit(maxBytes)}.`,
+          ? `📎 Документ сохранён. Обработка будет запущена отдельно. Лимит: ${formatFileSizeLimit(maxBytes)}.`
+          : `📎 Документы сохранены: ${items.length}. Обработка будет запущена отдельно. Лимит: ${formatFileSizeLimit(maxBytes)}.`,
       );
     } catch (error) {
       this.logger.debug("Не удалось обновить сообщение о загрузке документов", error.message);
     }
 
     try {
-      await this.#sendPrompt(chatId, buildDocumentBatchPrompt(downloadedDocuments));
+      await this.#queuePrompt(
+        threadId,
+        chatId,
+        buildDocumentBatchPrompt(downloadedDocuments),
+        { messagePrefix: "📚 Документы поставлены в очередь обработки" },
+      );
+      await this.#drainPromptQueue(threadId);
     } catch (error) {
       this.logger.warn("Документы сохранены, но не переданы Codex", {
         count: downloadedDocuments.length,
@@ -1313,18 +1321,51 @@ class CodexTelegramBot {
     await this.telegram.sendMessage(chatId, lines.join("\n"));
   }
 
-  async #sendPrompt(chatId, text) {
+  async #queuePrompt(threadId, chatId, text, options = {}) {
+    const queue = this.pendingPromptQueues.get(threadId) || [];
+    queue.push({ chatId, text });
+    this.pendingPromptQueues.set(threadId, queue);
+    const prefix = options.messagePrefix || "⏳ Codex уже работает. Задача поставлена в очередь";
+    await this.telegram.sendMessage(
+      chatId,
+      `${prefix}: ${queue.length}.`,
+    );
+    return false;
+  }
+
+  async #drainPromptQueue(threadId) {
+    if (this.drainingPromptThreads.has(threadId)) return;
+    if (this.activeByThread.has(threadId)) return;
+    const queue = this.pendingPromptQueues.get(threadId);
+    if (!queue?.length) return;
+
+    this.drainingPromptThreads.add(threadId);
+    try {
+      const next = queue.shift();
+      if (queue.length) {
+        this.pendingPromptQueues.set(threadId, queue);
+      } else {
+        this.pendingPromptQueues.delete(threadId);
+      }
+      await this.#sendPrompt(next.chatId, next.text, { queueWhenBusy: true });
+    } finally {
+      this.drainingPromptThreads.delete(threadId);
+    }
+  }
+
+  async #sendPrompt(chatId, text, options = {}) {
     const threadId = this.state.currentThreadId;
     if (!threadId) {
       await this.telegram.sendMessage(chatId, "Сначала выбери чат командой /chats.");
-      return;
+      return false;
     }
     if (this.activeByThread.has(threadId)) {
+      if (options.queueWhenBusy) return this.#queuePrompt(threadId, chatId, text);
       await this.telegram.sendMessage(
         chatId,
         "В этом чате уже выполняется задача. Используй /steer текст или /stop.",
       );
-      return;
+      return false;
     }
 
     await this.codex.resumeThread(threadId);
@@ -1336,6 +1377,7 @@ class CodexTelegramBot {
       }),
     ]);
     if (isThreadBusy(current.thread) || hasActiveTurn(recentTurns.data)) {
+      if (options.queueWhenBusy) return this.#queuePrompt(threadId, chatId, text);
       await this.telegram.sendMessage(
         chatId,
         [
@@ -1343,7 +1385,7 @@ class CodexTelegramBot {
           "Дождитесь завершения текущего ответа и отправьте сообщение ещё раз.",
         ].join("\n"),
       );
-      return;
+      return false;
     }
 
     const progress = await this.telegram.sendMessage(chatId, "⏳ Codex начинает работу…");
@@ -1363,9 +1405,11 @@ class CodexTelegramBot {
       context.turnId = result.turn.id;
       this.#rememberTurn(context.turnId, true, { threadId, chatId });
       if (!context.completed) this.activeByTurn.set(context.turnId, context);
+      return true;
     } catch (error) {
       this.activeByThread.delete(threadId);
       await this.telegram.editMessage(chatId, progress.message_id, `❌ ${error.message}`);
+      return false;
     }
   }
 
@@ -1511,6 +1555,8 @@ class CodexTelegramBot {
         message: error.message,
       });
     }
+
+    await this.#drainPromptQueue(context.threadId);
   }
 
   async #onServerRequest(message) {

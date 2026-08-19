@@ -43,6 +43,17 @@ const RELEASE_HISTORY = [
       "Uploaded originals are treated as read-only, and Codex is told to avoid PowerShell Get-Content/Set-Content for encoding fixes.",
     ],
   },
+  {
+    id: "2026-08-19-document-processing-queue",
+    version: "0.1.5",
+    sequence: 5,
+    title: "Document processing queue",
+    notes: [
+      "Telegram document handling is split into accept, store and process steps.",
+      "Saved document batches are put into a per-thread processing queue before Codex starts work.",
+      "Queued document batches wait for the active Codex turn instead of being rejected as a busy chat.",
+    ],
+  },
 ];
 
 const CURRENT_RELEASE = RELEASE_HISTORY.at(-1);

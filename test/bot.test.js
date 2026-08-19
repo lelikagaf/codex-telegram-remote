@@ -819,6 +819,94 @@ test("Telegram loose documents are batched into one Codex turn", async () => {
   assert.match(prompts[0], /Treat uploaded files as read-only/);
 });
 
+test("Telegram document batch waits in queue while Codex turn is active", async () => {
+  const sent = [];
+  const downloads = [];
+  const telegram = new EventEmitter();
+  telegram.sendMessage = async (chatId, text) => {
+    sent.push({ chatId, text });
+    return { message_id: sent.length };
+  };
+  telegram.sendLongMessage = async (chatId, text) => {
+    sent.push({ chatId, text });
+    return [{ message_id: sent.length }];
+  };
+  telegram.editMessage = async () => {};
+  telegram.downloadFile = async (fileId, destinationPath) => {
+    downloads.push({ fileId, destinationPath });
+    return { path: destinationPath, size: 100 };
+  };
+
+  const prompts = [];
+  const codex = new EventEmitter();
+  codex.resumeThread = async () => {};
+  codex.readThread = async () => ({
+    thread: { cwd: "C:\\Project", status: { type: "idle" }, turns: [] },
+  });
+  codex.listTurns = async () => ({ data: [] });
+  codex.startTurn = async (_threadId, text) => {
+    prompts.push(text);
+    return { turn: { id: `turn-${prompts.length}` } };
+  };
+
+  const stateStore = createStateStore();
+  const bot = new CodexTelegramBot({
+    telegram,
+    codex,
+    stateStore,
+    config: {
+      allowedUserId: 7,
+      defaultCwd: "C:\\Project",
+      desktopSyncPollMs: 1000,
+      telegramMaxFileBytes: 0,
+      looseDocumentBatchSettleMs: 5,
+    },
+    logger: createLogger(),
+  });
+
+  for (let index = 1; index <= 2; index += 1) {
+    await bot.handleUpdate({
+      message: {
+        message_id: index,
+        from: { id: 7 },
+        chat: { id: 100 },
+        document: { file_id: `first-${index}`, file_name: `first-${index}.md`, file_size: 100 },
+      },
+    });
+  }
+
+  await waitFor(() => prompts.length === 1);
+
+  for (let index = 1; index <= 2; index += 1) {
+    await bot.handleUpdate({
+      message: {
+        message_id: 10 + index,
+        from: { id: 7 },
+        chat: { id: 100 },
+        document: { file_id: `second-${index}`, file_name: `second-${index}.md`, file_size: 100 },
+      },
+    });
+  }
+
+  await waitFor(() => downloads.length === 4);
+
+  assert.equal(prompts.length, 1);
+  assert.equal(downloads.length, 4);
+  assert.ok(!sent.some((item) => /\/steer/.test(item.text)));
+
+  codex.emit("notification", {
+    method: "turn/completed",
+    params: { turn: { id: "turn-1", threadId: "thread-1", status: "completed" } },
+  });
+
+  await waitFor(() => prompts.length === 2);
+
+  assert.match(prompts[0], /1-first-1\.md/);
+  assert.match(prompts[0], /2-first-2\.md/);
+  assert.match(prompts[1], /11-second-1\.md/);
+  assert.match(prompts[1], /12-second-2\.md/);
+});
+
 test("collectOutgoingTelegramFiles returns multiple safe files from allowed root", (t) => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "codex-telegram-out-"));
   t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
