@@ -32,6 +32,17 @@ const RELEASE_HISTORY = [
       "Model and effort choices are read dynamically from Codex app-server.",
     ],
   },
+  {
+    id: "2026-08-19-document-batch-hardening",
+    version: "0.1.4",
+    sequence: 4,
+    title: "Document batch hardening",
+    notes: [
+      "Loose Telegram documents without media_group_id are now collected longer before starting a Codex turn.",
+      "Document prompts now require processing every listed file before focusing on one document.",
+      "Uploaded originals are treated as read-only, and Codex is told to avoid PowerShell Get-Content/Set-Content for encoding fixes.",
+    ],
+  },
 ];
 
 const CURRENT_RELEASE = RELEASE_HISTORY.at(-1);

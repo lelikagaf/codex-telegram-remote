@@ -543,6 +543,7 @@ test("Telegram-документ скачивается без лимита и п
       desktopSyncPollMs: 1000,
       telegramMaxFileBytes: 0,
       documentBatchSettleMs: 1,
+      looseDocumentBatchSettleMs: 1,
     },
     logger: createLogger(),
   });
@@ -593,6 +594,7 @@ test("Telegram-документ больше настроенного лимит
       desktopSyncPollMs: 1000,
       telegramMaxFileBytes: 1024,
       documentBatchSettleMs: 1,
+      looseDocumentBatchSettleMs: 1,
     },
     logger: createLogger(),
   });
@@ -755,7 +757,66 @@ test("Telegram documents from one media group are sent to Codex as one turn", as
   assert.match(prompts[0], /61-a\.md/);
   assert.match(prompts[0], /62-b\.md/);
   assert.match(prompts[0], /Use both files/);
+  assert.match(prompts[0], /Process every listed document/);
+  assert.match(prompts[0], /Do not use PowerShell Get-Content\/Set-Content/);
   assert.match(sent.at(-1).text, /Codex/);
+});
+
+test("Telegram loose documents are batched into one Codex turn", async () => {
+  const downloads = [];
+  const telegram = new EventEmitter();
+  telegram.sendMessage = async () => ({ message_id: downloads.length + 1 });
+  telegram.editMessage = async () => {};
+  telegram.downloadFile = async (fileId, destinationPath) => {
+    downloads.push({ fileId, destinationPath });
+    return { path: destinationPath, size: 100 };
+  };
+
+  const prompts = [];
+  const codex = new EventEmitter();
+  codex.resumeThread = async () => {};
+  codex.readThread = async () => ({
+    thread: { cwd: "C:\\Project", status: { type: "idle" }, turns: [] },
+  });
+  codex.listTurns = async () => ({ data: [] });
+  codex.startTurn = async (_threadId, text) => {
+    prompts.push(text);
+    return { turn: { id: `document-turn-${prompts.length}` } };
+  };
+
+  const bot = new CodexTelegramBot({
+    telegram,
+    codex,
+    stateStore: createStateStore(),
+    config: {
+      allowedUserId: 7,
+      defaultCwd: "C:\\Project",
+      desktopSyncPollMs: 1000,
+      telegramMaxFileBytes: 0,
+      looseDocumentBatchSettleMs: 5,
+    },
+    logger: createLogger(),
+  });
+
+  for (let index = 1; index <= 10; index += 1) {
+    await bot.handleUpdate({
+      message: {
+        message_id: 100 + index,
+        from: { id: 7 },
+        chat: { id: 100 },
+        document: { file_id: `file-${index}`, file_name: `doc-${index}.md`, file_size: 100 },
+      },
+    });
+  }
+
+  await waitFor(() => prompts.length === 1);
+
+  assert.equal(downloads.length, 10);
+  assert.equal(prompts.length, 1);
+  assert.match(prompts[0], /101-doc-1\.md/);
+  assert.match(prompts[0], /110-doc-10\.md/);
+  assert.match(prompts[0], /Process every listed document/);
+  assert.match(prompts[0], /Treat uploaded files as read-only/);
 });
 
 test("collectOutgoingTelegramFiles returns multiple safe files from allowed root", (t) => {
