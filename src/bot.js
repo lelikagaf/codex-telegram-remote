@@ -6,7 +6,7 @@ const { TelegramFileTooLargeError } = require("./telegram-client");
 
 const DESKTOP_TURN_SETTLE_MS = 6000;
 const DOCUMENT_BATCH_SETTLE_MS = 1200;
-const LOOSE_DOCUMENT_BATCH_SETTLE_MS = 8000;
+const INCOMING_MESSAGE_SETTLE_MS = 8000;
 const TELEGRAM_OUTGOING_FILE_LIMIT_BYTES = 50 * 1024 * 1024;
 const TELEGRAM_OUTGOING_FILE_LIMIT_COUNT = 10;
 const TELEGRAM_OUTGOING_DENIED_NAMES = new Set([
@@ -272,6 +272,31 @@ function buildDocumentBatchPrompt(documents) {
   ].join("\n");
 }
 
+function buildIncomingBatchPrompt({ documents = [], messages = [] }) {
+  const textMessages = messages
+    .map((item) => String(item.text || item.caption || "").trim())
+    .filter(Boolean);
+  const documentItems = Array.isArray(documents) ? documents : [];
+
+  if (!documentItems.length) {
+    return textMessages.join("\n\n");
+  }
+
+  const documentPrompt = buildDocumentBatchPrompt(documentItems);
+  if (!textMessages.length) return documentPrompt;
+
+  return [
+    "Пользователь отправил одну составную посылку через Telegram.",
+    "",
+    "Сообщения пользователя:",
+    ...textMessages.map((text, index) => `${index + 1}. ${text}`),
+    "",
+    documentPrompt,
+    "",
+    "Считай сообщения пользователя общей инструкцией ко всем документам этой посылки.",
+  ].join("\n");
+}
+
 function trimLocalFilePathCandidate(value) {
   let candidate = String(value || "").trim();
   while (candidate && /[.,;:)\]}]+$/.test(candidate)) {
@@ -472,7 +497,9 @@ class CodexTelegramBot {
     this.telegramFinalDeliveryPromises = new Map();
     this.documentBatches = new Map();
     this.documentBatchSettleMs = Number(config.documentBatchSettleMs) || DOCUMENT_BATCH_SETTLE_MS;
-    this.looseDocumentBatchSettleMs = Number(config.looseDocumentBatchSettleMs) || LOOSE_DOCUMENT_BATCH_SETTLE_MS;
+    this.incomingMessageSettleMs = Number(config.incomingMessageSettleMs) ||
+      Number(config.looseDocumentBatchSettleMs) ||
+      INCOMING_MESSAGE_SETTLE_MS;
     this.pendingPromptQueues = new Map();
     this.drainingPromptThreads = new Set();
 
@@ -572,7 +599,7 @@ class CodexTelegramBot {
 
     this.state = this.stateStore.save({ lastChatId: chatId });
     if (message.document) {
-      await this.#enqueueDocument(chatId, message);
+      await this.#enqueueIncomingMessage(chatId, message);
       return;
     }
 
@@ -586,7 +613,7 @@ class CodexTelegramBot {
     }
 
     if (!text.startsWith("/")) {
-      await this.#sendPrompt(chatId, text);
+      await this.#enqueueIncomingMessage(chatId, message);
       return;
     }
 
@@ -655,9 +682,8 @@ class CodexTelegramBot {
     }
   }
 
-  async #enqueueDocument(chatId, message) {
-    const groupId = message.media_group_id ? String(message.media_group_id) : "loose";
-    const key = `${chatId}:${groupId}`;
+  async #enqueueIncomingMessage(chatId, message) {
+    const key = String(chatId);
     let batch = this.documentBatches.get(key);
     if (!batch) {
       batch = { chatId, messages: [], timer: null };
@@ -665,10 +691,10 @@ class CodexTelegramBot {
     }
     batch.messages.push(message);
     if (batch.timer) clearTimeout(batch.timer);
-    const settleMs = message.media_group_id ? this.documentBatchSettleMs : this.looseDocumentBatchSettleMs;
+    const settleMs = message.media_group_id ? this.documentBatchSettleMs : this.incomingMessageSettleMs;
     batch.timer = setTimeout(() => {
       this.#flushDocumentBatch(key).catch((error) =>
-        this.logger.error("Ошибка обработки пакета документов Telegram", error.stack || error.message),
+        this.logger.error("Ошибка обработки входящей посылки Telegram", error.stack || error.message),
       );
     }, settleMs);
     batch.timer.unref?.();
@@ -690,7 +716,19 @@ class CodexTelegramBot {
     }
 
     const items = messages.filter((item) => item?.document);
-    if (!items.length) return;
+    const textItems = messages.filter((item) => !item?.document && typeof item?.text === "string");
+    if (!items.length) {
+      const prompt = buildIncomingBatchPrompt({ messages: textItems });
+      if (!prompt) return;
+      await this.#queuePrompt(
+        threadId,
+        chatId,
+        prompt,
+        { messagePrefix: "✉️ Сообщение поставлено в очередь обработки" },
+      );
+      await this.#drainPromptQueue(threadId);
+      return;
+    }
 
     const maxBytes = this.config.telegramMaxFileBytes || 0;
     const oversized = items.find((item) => Number(item.document.file_size) > maxBytes);
@@ -759,7 +797,7 @@ class CodexTelegramBot {
       await this.#queuePrompt(
         threadId,
         chatId,
-        buildDocumentBatchPrompt(downloadedDocuments),
+        buildIncomingBatchPrompt({ documents: downloadedDocuments, messages: textItems }),
         { messagePrefix: "📚 Документы поставлены в очередь обработки" },
       );
       await this.#drainPromptQueue(threadId);
@@ -1642,6 +1680,7 @@ module.exports = {
   extractTurnUserText,
   appendPendingTelegramFinal,
   buildDocumentPrompt,
+  buildIncomingBatchPrompt,
   collectOutgoingTelegramFiles,
   extractLocalFilePathCandidates,
   formatFileSizeLimit,

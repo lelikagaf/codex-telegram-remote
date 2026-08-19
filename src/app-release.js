@@ -54,6 +54,17 @@ const RELEASE_HISTORY = [
       "Queued document batches wait for the active Codex turn instead of being rejected as a busy chat.",
     ],
   },
+  {
+    id: "2026-08-19-incoming-message-batching",
+    version: "0.1.6",
+    sequence: 6,
+    title: "Incoming message batching",
+    notes: [
+      "Non-command Telegram text and documents are now collected into one incoming message batch.",
+      "The bot waits for a quiet period before processing, so one user request split across messages stays together.",
+      "Processing starts only after the full batch is accepted and stored.",
+    ],
+  },
 ];
 
 const CURRENT_RELEASE = RELEASE_HISTORY.at(-1);

@@ -387,13 +387,14 @@ test("финал Telegram-turn отправляется новым сообще�
     telegram,
     codex,
     stateStore,
-    config: { allowedUserId: 7, desktopSyncPollMs: 1000 },
+    config: { allowedUserId: 7, desktopSyncPollMs: 1000, incomingMessageSettleMs: 1 },
     logger: createLogger(),
   });
 
   await bot.handleUpdate({
     message: { from: { id: 7 }, chat: { id: 100 }, text: "Сделай" },
   });
+  await waitFor(() => sent.some((item) => item.text === "⏳ Codex начинает работу…"));
   codex.emit("notification", {
     method: "item/completed",
     params: {
@@ -411,6 +412,7 @@ test("финал Telegram-turn отправляется новым сообще�
   assert.deepEqual(
     sent.map((item) => [item.kind, item.text]),
     [
+      ["message", "✉️ Сообщение поставлено в очередь обработки: 1."],
       ["message", "⏳ Codex начинает работу…"],
       ["final", "Готово"],
     ],
@@ -443,7 +445,7 @@ test("Telegram не запускает новый turn, пока Desktop-turn а
     telegram,
     codex,
     stateStore: createStateStore(),
-    config: { allowedUserId: 7, desktopSyncPollMs: 1000 },
+    config: { allowedUserId: 7, desktopSyncPollMs: 1000, incomingMessageSettleMs: 1 },
     logger: createLogger(),
   });
 
@@ -451,8 +453,9 @@ test("Telegram не запускает новый turn, пока Desktop-turn а
     message: { from: { id: 7 }, chat: { id: 100 }, text: "Не запускать параллельно" },
   });
 
+  await waitFor(() => sent.length > 0);
   assert.equal(startTurnCalls, 0);
-  assert.match(sent.at(-1).text, /чат сейчас занят/);
+  assert.match(sent.at(-1).text, /очередь/);
 });
 
 test("первое сообщение запускается в ещё не материализованном чате", async () => {
@@ -482,7 +485,7 @@ test("первое сообщение запускается в ещё не ма
     telegram,
     codex,
     stateStore: createStateStore(),
-    config: { allowedUserId: 7, desktopSyncPollMs: 1000 },
+    config: { allowedUserId: 7, desktopSyncPollMs: 1000, incomingMessageSettleMs: 1 },
     logger: createLogger(),
   });
 
@@ -490,8 +493,43 @@ test("первое сообщение запускается в ещё не ма
     message: { from: { id: 7 }, chat: { id: 100 }, text: "Первое сообщение" },
   });
 
-  assert.equal(startTurnCalls, 1);
+  await waitFor(() => startTurnCalls === 1);
   assert.equal(sent.at(-1).text, "⏳ Codex начинает работу…");
+});
+
+test("несколько Telegram-сообщений склеиваются в одну входящую посылку", async () => {
+  const telegram = new EventEmitter();
+  telegram.sendMessage = async () => ({ message_id: 10 });
+  telegram.editMessage = async () => {};
+
+  const prompts = [];
+  const codex = new EventEmitter();
+  codex.resumeThread = async () => {};
+  codex.readThread = async () => ({ thread: { status: { type: "idle" }, turns: [] } });
+  codex.listTurns = async () => ({ data: [] });
+  codex.startTurn = async (_threadId, text) => {
+    prompts.push(text);
+    return { turn: { id: "telegram-turn" } };
+  };
+
+  const bot = new CodexTelegramBot({
+    telegram,
+    codex,
+    stateStore: createStateStore(),
+    config: { allowedUserId: 7, desktopSyncPollMs: 1000, incomingMessageSettleMs: 5 },
+    logger: createLogger(),
+  });
+
+  await bot.handleUpdate({
+    message: { from: { id: 7 }, chat: { id: 100 }, text: "Первая часть" },
+  });
+  await bot.handleUpdate({
+    message: { from: { id: 7 }, chat: { id: 100 }, text: "Вторая часть" },
+  });
+
+  await waitFor(() => prompts.length === 1);
+
+  assert.equal(prompts[0], "Первая часть\n\nВторая часть");
 });
 
 test("распознаётся ошибка ещё не материализованного чата", () => {
@@ -957,20 +995,25 @@ test("Telegram final sends multiple referenced files as documents", async (t) =>
   codex.resumeThread = async () => {};
   codex.readThread = async () => ({ thread: { status: { type: "idle" }, turns: [] } });
   codex.listTurns = async () => ({ data: [] });
-  codex.startTurn = async () => ({ turn: { id: "turn-files" } });
+  let startTurnCalls = 0;
+  codex.startTurn = async () => {
+    startTurnCalls += 1;
+    return { turn: { id: "turn-files" } };
+  };
 
   const stateStore = createStateStore();
   const bot = new CodexTelegramBot({
     telegram,
     codex,
     stateStore,
-    config: { allowedUserId: 7, defaultCwd: directory, desktopSyncPollMs: 1000 },
+    config: { allowedUserId: 7, defaultCwd: directory, desktopSyncPollMs: 1000, incomingMessageSettleMs: 1 },
     logger: createLogger(),
   });
 
   await bot.handleUpdate({
     message: { from: { id: 7 }, chat: { id: 100 }, text: "Make files" },
   });
+  await waitFor(() => startTurnCalls === 1);
   codex.emit("notification", {
     method: "item/completed",
     params: {
