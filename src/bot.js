@@ -23,6 +23,16 @@ const TELEGRAM_OUTGOING_DENIED_SEGMENTS = new Set([
   "logs",
   "node_modules",
 ]);
+const REASONING_EFFORT_DESCRIPTIONS = {
+  none: "без углублённого анализа, минимальная задержка",
+  minimal: "минимальные рассуждения для самых простых задач",
+  low: "быстрые ответы с лёгким анализом",
+  medium: "баланс скорости и глубины для повседневных задач",
+  high: "глубокий анализ сложных задач",
+  xhigh: "очень глубокий анализ сложных задач",
+  max: "максимальная глубина для самых трудных задач",
+  ultra: "максимальная глубина с автоматическим делегированием подзадач",
+};
 
 const HELP_TEXT = [
   "Команды:",
@@ -30,6 +40,7 @@ const HELP_TEXT = [
   "/current — выбранный чат",
   "/use 2 — выбрать чат из последнего списка",
   "/new Название — создать новый чат",
+  "/model — модель и усилие рассуждений",
   "/status — состояние текущей задачи",
   "/stop — остановить текущую задачу",
   "/steer текст — уточнить выполняемую задачу",
@@ -328,6 +339,78 @@ function formatFileSizeLimit(bytes) {
   return `${Math.round((bytes / (1024 * 1024)) * 100) / 100} МБ`;
 }
 
+function modelByName(models, value) {
+  const normalized = String(value || "").trim().toLowerCase();
+  if (!normalized) return null;
+  return (Array.isArray(models) ? models : []).find((model) =>
+    [model?.model, model?.id, model?.displayName]
+      .filter(Boolean)
+      .some((candidate) => String(candidate).toLowerCase() === normalized),
+  ) || null;
+}
+
+function reasoningEffortOptions(model) {
+  return (Array.isArray(model?.supportedReasoningEfforts)
+    ? model.supportedReasoningEfforts
+    : [])
+    .map((option) => ({
+      value: String(option?.reasoningEffort || "").trim().toLowerCase(),
+      description: String(option?.description || "").trim(),
+    }))
+    .filter((option) => option.value);
+}
+
+function reasoningEffortDescription(effort, fallback = "") {
+  return REASONING_EFFORT_DESCRIPTIONS[String(effort || "").toLowerCase()] || fallback;
+}
+
+function formatModelSettings(settings, models) {
+  const model = modelByName(models, settings?.model);
+  const modelName = model?.displayName || settings?.model || "не определена";
+  const modelSlug = settings?.model && modelName !== settings.model ? ` (${settings.model})` : "";
+  const effectiveEffort = settings?.reasoningEffort || model?.defaultReasoningEffort || null;
+  const options = reasoningEffortOptions(model);
+  const selectedOption = options.find((option) => option.value === effectiveEffort);
+  const inherited = !settings?.reasoningEffort && effectiveEffort ? " (по умолчанию)" : "";
+  const lines = [
+    "Текущая конфигурация выбранного чата:",
+    `Модель: ${modelName}${modelSlug}`,
+    `Усилие: ${effectiveEffort || "не определено"}${inherited}${effectiveEffort ? ` — ${reasoningEffortDescription(effectiveEffort, selectedOption?.description)}` : ""}`,
+  ];
+
+  if (options.length) {
+    lines.push("", "Доступные усилия для этой модели:");
+    for (const option of options) {
+      lines.push(
+        `- ${option.value} — ${reasoningEffortDescription(option.value, option.description)}`,
+      );
+    }
+  }
+
+  lines.push(
+    "",
+    "Изменить усилие: /model high",
+    "Изменить модель: /model gpt-5.6-terra",
+    "Изменить оба параметра: /model gpt-5.6-terra high",
+    "Список моделей: /model list",
+    "Изменения применяются к следующим задачам в выбранном чате.",
+  );
+  return lines.join("\n");
+}
+
+function formatModelList(models) {
+  const visible = (Array.isArray(models) ? models : []).filter((model) => !model?.hidden);
+  if (!visible.length) return "Codex не вернул список доступных моделей.";
+  return [
+    "Доступные модели:",
+    ...visible.map((model) =>
+      `- ${model.model}${model.isDefault ? " (по умолчанию)" : ""}; базовое усилие: ${model.defaultReasoningEffort || "не указано"}`,
+    ),
+    "",
+    "Выбор: /model имя-модели [усилие]",
+  ].join("\n");
+}
+
 function appendPendingTelegramFinal(items, entry, limit = 200) {
   const turnId = String(entry?.turnId || "");
   if (!turnId) return Array.isArray(items) ? items : [];
@@ -404,6 +487,7 @@ class CodexTelegramBot {
       { command: "current", description: "Текущий чат" },
       { command: "use", description: "Сменить текущий чат" },
       { command: "new", description: "Создать новый чат" },
+      { command: "model", description: "Модель и усилие рассуждений" },
       { command: "status", description: "Статус задачи" },
       { command: "stop", description: "Остановить задачу" },
       { command: "approve", description: "Разрешить действие" },
@@ -515,6 +599,20 @@ class CodexTelegramBot {
         break;
       case "/new":
         await this.#newThread(chatId, argument);
+        break;
+      case "/model":
+        try {
+          await this.#showOrSetModel(chatId, argument);
+        } catch (error) {
+          this.logger.warn("Не удалось обработать настройки модели", error.message);
+          await this.telegram.sendMessage(
+            chatId,
+            [
+              `❌ Не удалось прочитать или изменить настройки модели: ${error.message}`,
+              "Если чат занят в Codex Desktop, дождись завершения задачи и повтори команду.",
+            ].join("\n"),
+          );
+        }
         break;
       case "/status":
         await this.#showStatus(chatId);
@@ -1104,6 +1202,88 @@ class CodexTelegramBot {
     await this.telegram.sendLongMessage(chatId, this.releaseTracker.formatHistory(limit));
   }
 
+  async #showOrSetModel(chatId, argument) {
+    const threadId = this.state.currentThreadId;
+    if (!threadId) {
+      await this.telegram.sendMessage(chatId, "Сначала выбери чат командой /chats.");
+      return;
+    }
+
+    const [settings, modelResult] = await Promise.all([
+      this.codex.getThreadModelSettings(threadId),
+      this.codex.listModels({ includeHidden: true }),
+    ]);
+    const models = modelResult.data || [];
+    const tokens = String(argument || "").trim().split(/\s+/).filter(Boolean);
+
+    if (!tokens.length || tokens[0].toLowerCase() === "status") {
+      await this.telegram.sendLongMessage(chatId, formatModelSettings(settings, models));
+      return;
+    }
+    if (tokens.length === 1 && tokens[0].toLowerCase() === "list") {
+      await this.telegram.sendLongMessage(chatId, formatModelList(models));
+      return;
+    }
+    if (tokens.length > 2) {
+      await this.telegram.sendMessage(
+        chatId,
+        "Формат: /model [усилие] или /model модель [усилие]",
+      );
+      return;
+    }
+
+    const currentModel = modelByName(models, settings.model);
+    const currentEfforts = reasoningEffortOptions(currentModel).map((option) => option.value);
+    let selectedModel = currentModel;
+    let requestedModel;
+    let requestedEffort;
+
+    if (tokens.length === 1 && currentEfforts.includes(tokens[0].toLowerCase())) {
+      requestedEffort = tokens[0].toLowerCase();
+    } else {
+      selectedModel = modelByName(models, tokens[0]);
+      if (!selectedModel || selectedModel.hidden) {
+        await this.telegram.sendMessage(
+          chatId,
+          `Модель «${tokens[0]}» недоступна. Используй /model list.`,
+        );
+        return;
+      }
+      requestedModel = selectedModel.model;
+      if (tokens[1]) requestedEffort = tokens[1].toLowerCase();
+    }
+
+    const selectedEfforts = reasoningEffortOptions(selectedModel).map((option) => option.value);
+    if (requestedEffort && !selectedEfforts.includes(requestedEffort)) {
+      await this.telegram.sendMessage(
+        chatId,
+        [
+          `Усилие «${requestedEffort}» не поддерживается моделью ${selectedModel?.model || settings.model}.`,
+          `Доступно: ${selectedEfforts.join(", ") || "список не получен"}.`,
+        ].join("\n"),
+      );
+      return;
+    }
+
+    if (
+      requestedModel &&
+      !requestedEffort &&
+      settings.reasoningEffort &&
+      !selectedEfforts.includes(settings.reasoningEffort)
+    ) {
+      requestedEffort = selectedModel.defaultReasoningEffort;
+    }
+
+    const updated = await this.codex.updateThreadModelSettings(threadId, {
+      ...(requestedModel ? { model: requestedModel } : {}),
+      ...(requestedEffort ? { reasoningEffort: requestedEffort } : {}),
+    });
+    await this.telegram.sendLongMessage(
+      chatId,
+      `✅ Настройки обновлены.\n\n${formatModelSettings(updated, models)}`,
+    );
+  }
+
   async #showStatus(chatId) {
     const threadId = this.state.currentThreadId;
     const active = threadId ? this.activeByThread.get(threadId) : null;
@@ -1405,6 +1585,8 @@ module.exports = {
   collectOutgoingTelegramFiles,
   extractLocalFilePathCandidates,
   formatFileSizeLimit,
+  formatModelList,
+  formatModelSettings,
   formatTelegramTurnResult,
   hasActiveTurn,
   isAgentMessage,
@@ -1414,6 +1596,9 @@ module.exports = {
   isThreadBusy,
   isUnmaterializedThreadError,
   isUserMessage,
+  modelByName,
+  reasoningEffortDescription,
+  reasoningEffortOptions,
   resolveTelegramUploadCwd,
   nextTelegramUploadPath,
   sanitizeTelegramFileName,

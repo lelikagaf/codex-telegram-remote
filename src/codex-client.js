@@ -38,6 +38,7 @@ class CodexClient extends EventEmitter {
     this.nextId = 1;
     this.startPromise = null;
     this.loadedThreads = new Set();
+    this.threadModelSettings = new Map();
   }
 
   get isRunning() {
@@ -111,6 +112,7 @@ class CodexClient extends EventEmitter {
     const pending = [...this.pending.values()];
     this.pending.clear();
     this.loadedThreads.clear();
+    this.threadModelSettings.clear();
     this.child = null;
     for (const item of pending) {
       clearTimeout(item.timer);
@@ -140,6 +142,17 @@ class CodexClient extends EventEmitter {
     if (message.method && message.id !== undefined) {
       this.emit("serverRequest", message);
       return;
+    }
+
+    if (message.method === "thread/settings/updated") {
+      const threadId = message.params?.threadId;
+      const settings = message.params?.threadSettings;
+      if (threadId && settings) {
+        this.threadModelSettings.set(threadId, {
+          model: settings.model,
+          reasoningEffort: settings.effort ?? null,
+        });
+      }
     }
 
     if (message.method) this.emit("notification", message);
@@ -213,9 +226,17 @@ class CodexClient extends EventEmitter {
   }
 
   async resumeThread(threadId) {
-    if (this.loadedThreads.has(threadId)) return;
-    await this.request("thread/resume", { threadId }, 120000);
+    if (this.loadedThreads.has(threadId)) {
+      return this.threadModelSettings.get(threadId) || null;
+    }
+    const result = await this.request("thread/resume", { threadId }, 120000);
     this.loadedThreads.add(threadId);
+    const settings = {
+      model: result.model,
+      reasoningEffort: result.reasoningEffort ?? null,
+    };
+    this.threadModelSettings.set(threadId, settings);
+    return settings;
   }
 
   async startThread({ cwd, name = null }) {
@@ -226,11 +247,41 @@ class CodexClient extends EventEmitter {
     );
     const threadId = result.thread.id;
     this.loadedThreads.add(threadId);
+    this.threadModelSettings.set(threadId, {
+      model: result.model,
+      reasoningEffort: result.reasoningEffort ?? null,
+    });
     if (name) {
       await this.request("thread/name/set", { threadId, name });
       result.thread.name = name;
     }
     return result;
+  }
+
+  listModels({ includeHidden = false } = {}) {
+    return this.request("model/list", { includeHidden });
+  }
+
+  async getThreadModelSettings(threadId) {
+    const settings = await this.resumeThread(threadId);
+    if (!settings) throw new Error("Codex не вернул настройки модели выбранного чата.");
+    return { ...settings };
+  }
+
+  async updateThreadModelSettings(threadId, { model, reasoningEffort } = {}) {
+    const current = await this.getThreadModelSettings(threadId);
+    const params = { threadId };
+    if (model !== undefined) params.model = model;
+    if (reasoningEffort !== undefined) params.effort = reasoningEffort;
+    await this.request("thread/settings/update", params);
+
+    const settings = {
+      model: model === undefined ? current.model : model,
+      reasoningEffort:
+        reasoningEffort === undefined ? current.reasoningEffort : reasoningEffort,
+    };
+    this.threadModelSettings.set(threadId, settings);
+    return { ...settings };
   }
 
   startTurn(threadId, text) {
@@ -257,6 +308,7 @@ class CodexClient extends EventEmitter {
     const child = this.child;
     this.child = null;
     this.loadedThreads.clear();
+    this.threadModelSettings.clear();
     if (child && !child.killed) child.kill();
   }
 }

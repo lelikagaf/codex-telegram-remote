@@ -21,6 +21,17 @@ const RELEASE_HISTORY = [
       "Added Telegram commands /release and /releases.",
     ],
   },
+  {
+    id: "2026-08-19-model-settings",
+    version: "0.1.3",
+    sequence: 3,
+    title: "Model settings",
+    notes: [
+      "Added /model to show the current Codex model and reasoning effort.",
+      "Added changing the model and reasoning effort for the selected chat.",
+      "Model and effort choices are read dynamically from Codex app-server.",
+    ],
+  },
 ];
 
 const CURRENT_RELEASE = RELEASE_HISTORY.at(-1);

@@ -13,6 +13,8 @@ const {
   extractTurnAnswer,
   extractTurnUserMessages,
   extractTurnUserText,
+  formatModelList,
+  formatModelSettings,
   formatTelegramTurnResult,
   hasActiveTurn,
   isAgentMessage,
@@ -22,6 +24,7 @@ const {
   isThreadBusy,
   isUnmaterializedThreadError,
   isUserMessage,
+  modelByName,
   nextTelegramUploadPath,
   resolveTelegramUploadCwd,
   sanitizeTelegramFileName,
@@ -252,6 +255,109 @@ test("результат Telegram-turn сохраняет статус ошиб�
     formatTelegramTurnResult({ status: "failed", error: { message: "Сбой" } }, ""),
     "❌ Задача завершена со статусом: failed\nСбой",
   );
+});
+
+const modelCatalog = [
+  {
+    id: "gpt-5.6-sol",
+    model: "gpt-5.6-sol",
+    displayName: "GPT-5.6-Sol",
+    isDefault: true,
+    hidden: false,
+    defaultReasoningEffort: "low",
+    supportedReasoningEfforts: [
+      { reasoningEffort: "low", description: "Fast responses" },
+      { reasoningEffort: "high", description: "Deep reasoning" },
+      { reasoningEffort: "ultra", description: "Automatic delegation" },
+    ],
+  },
+  {
+    id: "gpt-5.6-terra",
+    model: "gpt-5.6-terra",
+    displayName: "GPT-5.6-Terra",
+    isDefault: false,
+    hidden: false,
+    defaultReasoningEffort: "medium",
+    supportedReasoningEfforts: [
+      { reasoningEffort: "low", description: "Fast responses" },
+      { reasoningEffort: "medium", description: "Balanced" },
+      { reasoningEffort: "high", description: "Deep reasoning" },
+    ],
+  },
+];
+
+test("формат модели показывает текущие и доступные усилия", () => {
+  assert.equal(modelByName(modelCatalog, "GPT-5.6-SOL"), modelCatalog[0]);
+  assert.match(
+    formatModelSettings(
+      { model: "gpt-5.6-sol", reasoningEffort: "ultra" },
+      modelCatalog,
+    ),
+    /ultra — максимальная глубина с автоматическим делегированием/,
+  );
+  assert.match(formatModelList(modelCatalog), /gpt-5\.6-terra/);
+});
+
+test("команда /model меняет усилие выбранного чата", async () => {
+  const sent = [];
+  const telegram = new EventEmitter();
+  telegram.sendMessage = async (chatId, text) => sent.push({ chatId, text });
+  telegram.sendLongMessage = async (chatId, text) => sent.push({ chatId, text });
+
+  const updates = [];
+  const codex = new EventEmitter();
+  codex.getThreadModelSettings = async () => ({
+    model: "gpt-5.6-sol",
+    reasoningEffort: "low",
+  });
+  codex.listModels = async () => ({ data: modelCatalog });
+  codex.updateThreadModelSettings = async (threadId, settings) => {
+    updates.push({ threadId, settings });
+    return { model: "gpt-5.6-sol", reasoningEffort: settings.reasoningEffort };
+  };
+
+  const bot = new CodexTelegramBot({
+    telegram,
+    codex,
+    stateStore: createStateStore(),
+    config: { allowedUserId: 7, desktopSyncPollMs: 1000 },
+    logger: createLogger(),
+  });
+
+  await bot.handleUpdate({
+    message: { from: { id: 7 }, chat: { id: 100 }, text: "/model high" },
+  });
+
+  assert.deepEqual(updates, [
+    { threadId: "thread-1", settings: { reasoningEffort: "high" } },
+  ]);
+  assert.match(sent.at(-1).text, /Настройки обновлены/);
+  assert.match(sent.at(-1).text, /Усилие: high/);
+});
+
+test("команда /model добавлена в меню быстрых команд", async () => {
+  let commands = [];
+  const telegram = new EventEmitter();
+  telegram.deleteWebhook = async () => {};
+  telegram.setMyCommands = async (items) => {
+    commands = items;
+  };
+
+  const codex = new EventEmitter();
+  codex.ensureStarted = async () => {};
+
+  const bot = new CodexTelegramBot({
+    telegram,
+    codex,
+    stateStore: createStateStore({ currentThreadId: null, lastChatId: null }),
+    config: { allowedUserId: 7, desktopSyncPollMs: 1000 },
+    logger: createLogger(),
+  });
+
+  await bot.initialize();
+  bot.stop();
+
+  assert.equal(commands.some((item) => item.command === "model"), true);
 });
 
 test("финал Telegram-turn отправляется новым сообщением и подтверждается в состоянии", async () => {
