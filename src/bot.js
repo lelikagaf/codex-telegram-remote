@@ -298,18 +298,26 @@ function buildIncomingBatchPrompt({ documents = [], messages = [] }) {
 
 function trimLocalFilePathCandidate(value) {
   let candidate = String(value || "").trim();
+  if (/^[A-Za-z]:[\\/]/.test(candidate)) {
+    candidate = candidate.replace(/^([A-Za-z]):\//, "$1:\\");
+    candidate = candidate.replace(/\//g, "\\");
+  }
   while (candidate && /[.,;:)\]}]+$/.test(candidate)) {
     candidate = candidate.slice(0, -1).trimEnd();
   }
+  candidate = candidate.replace(/:(\d+)$/, "");
   return candidate;
 }
 
 function extractLocalFilePathCandidates(text) {
   const candidates = [];
-  for (const line of String(text || "").split(/\r?\n/)) {
-    const cleaned = line.replace(/[`*_]/g, "");
-    for (const match of cleaned.matchAll(/[A-Za-z]:\\[^\r\n"<>|]+/g)) {
-      candidates.push(trimLocalFilePathCandidate(match[0]));
+  const normalized = String(text || "")
+    .replace(/([A-Za-z]:)\s*\r?\n\s*(\\|\/)/g, "$1$2")
+    .replace(/([A-Za-z]):\//g, "$1:\\");
+  for (const line of normalized.split(/\r?\n/)) {
+    const cleaned = line.replace(/[`]/g, "");
+    for (const match of cleaned.matchAll(/(?:^|[\s(["'])([A-Za-z]:[\\/][^\r\n"<>|]+)/g)) {
+      candidates.push(trimLocalFilePathCandidate(match[1]));
     }
     for (const match of cleaned.matchAll(/(?:^|[\s(["'])((?:\/[^\s`"'<>]+)+)/g)) {
       candidates.push(trimLocalFilePathCandidate(match[1]));

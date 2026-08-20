@@ -1085,6 +1085,34 @@ test("collectOutgoingTelegramFiles returns multiple safe files from allowed root
   );
 });
 
+test("collectOutgoingTelegramFiles recognizes Codex markdown and wrapped Windows paths", (t) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "codex-telegram-report-"));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+
+  const docs = path.join(directory, "docs");
+  fs.mkdirSync(docs);
+  const report = path.join(docs, "INDUSTRY_PRACTICE_CHECK_1.md");
+  fs.writeFileSync(report, "report");
+
+  const slashPath = report.replace(/\\/g, "/");
+  const wrappedPath = report.replace(/^([A-Za-z]:)\\/, "$1\n\\");
+
+  assert.deepEqual(
+    collectOutgoingTelegramFiles(
+      [
+        `Отчёт готов здесь: [INDUSTRY_PRACTICE_CHECK_1.md](${slashPath}:1)`,
+        "",
+        "Локальный путь для отправки/открытия:",
+        "```text",
+        wrappedPath,
+        "```",
+      ].join("\n"),
+      { roots: [directory] },
+    ),
+    [path.resolve(report)],
+  );
+});
+
 test("Telegram final sends multiple referenced files as documents", async (t) => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "codex-telegram-final-files-"));
   t.after(() => fs.rmSync(directory, { recursive: true, force: true }));

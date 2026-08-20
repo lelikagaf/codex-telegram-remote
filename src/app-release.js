@@ -77,6 +77,17 @@ const RELEASE_HISTORY = [
       "Removed the obsolete direct single-document handling path.",
     ],
   },
+  {
+    id: "2026-08-20-outgoing-file-path-detection",
+    version: "0.1.8",
+    sequence: 8,
+    title: "Outgoing file path detection",
+    notes: [
+      "Outgoing file detection now recognizes Codex markdown links with C:/ Windows paths.",
+      "Wrapped Windows paths such as C: followed by \\Users on the next line are rejoined before matching.",
+      "File names with underscores are preserved when extracting paths for Telegram document sending.",
+    ],
+  },
 ];
 
 const CURRENT_RELEASE = RELEASE_HISTORY.at(-1);
