@@ -75,6 +75,9 @@ start-bot.cmd
 9. Отправить документ с подписью. Файл должен появиться в
    `.codex-telegram-uploads` рабочего каталога, а подпись — стать инструкцией
    для Codex.
+10. После завершения задания из Telegram подождать `CODEX_WRITER_IDLE_SECONDS`
+    и открыть тот же чат в Codex Desktop. Ошибки `already has an active writer`
+    быть не должно.
 
 ## Лимит документов
 

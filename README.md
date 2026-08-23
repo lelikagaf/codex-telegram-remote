@@ -115,6 +115,7 @@ TELEGRAM_NOTIFY_AFTER_SLEEP=false
 TELEGRAM_MAX_FILE_SIZE_MB=0
 RESUME_NOTIFICATION_GAP_SECONDS=120
 DESKTOP_SYNC_POLL_SECONDS=3
+CODEX_WRITER_IDLE_SECONDS=90
 LOG_LEVEL=info
 ```
 
@@ -127,6 +128,9 @@ LOG_LEVEL=info
 `TELEGRAM_MAX_FILE_SIZE_MB` задаёт максимальный размер загружаемого документа в
 мегабайтах. Значения `0` и `-1` отключают ограничение со стороны бота. При этом
 могут сохраняться собственные технические ограничения Telegram Bot API.
+`CODEX_WRITER_IDLE_SECONDS` задаёт, через сколько секунд простоя бот закрывает
+свой Codex app-server после write-действий, чтобы выбранный чат снова мог
+открываться в Codex Desktop без конфликта active writer.
 
 Запуск:
 

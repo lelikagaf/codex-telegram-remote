@@ -18,6 +18,7 @@ const {
   formatTelegramTurnResult,
   hasActiveTurn,
   isAgentMessage,
+  isActiveWriterError,
   isActiveTurnStatus,
   isDesktopTurnSettled,
   isTerminalTurnStatus,
@@ -73,6 +74,10 @@ async function waitFor(predicate, timeoutMs = 1000) {
     await new Promise((resolve) => setTimeout(resolve, 5));
   }
   assert.fail("Истекло время ожидания условия");
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 test("извлекается текст agentMessage", () => {
@@ -421,6 +426,97 @@ test("финал Telegram-turn отправляется новым сообще�
   assert.deepEqual(stateStore.state.telegramPendingFinals, []);
 });
 
+test("после завершения Telegram-turn бот отпускает writer lease", async () => {
+  const sent = [];
+  const telegram = new EventEmitter();
+  telegram.sendMessage = async (_chatId, text) => {
+    sent.push(text);
+    return { message_id: sent.length };
+  };
+  telegram.sendLongMessage = async () => [{ message_id: 11 }];
+  telegram.editMessage = async () => {};
+
+  let stopCalls = 0;
+  const codex = new EventEmitter();
+  codex.resumeThread = async () => {};
+  codex.readThread = async () => ({ thread: { status: { type: "idle" }, turns: [] } });
+  codex.listTurns = async () => ({ data: [] });
+  codex.startTurn = async () => ({ turn: { id: "turn-lease" } });
+  codex.stop = () => {
+    stopCalls += 1;
+  };
+
+  const bot = new CodexTelegramBot({
+    telegram,
+    codex,
+    stateStore: createStateStore(),
+    config: {
+      allowedUserId: 7,
+      desktopSyncPollMs: 1000,
+      incomingMessageSettleMs: 1,
+      writerIdleMs: 10,
+    },
+    logger: createLogger(),
+  });
+
+  await bot.handleUpdate({
+    message: { from: { id: 7 }, chat: { id: 100 }, text: "Сделай и отпусти" },
+  });
+  await waitFor(() => sent.includes("⏳ Codex начинает работу…"));
+  codex.emit("notification", {
+    method: "turn/completed",
+    params: { turn: { id: "turn-lease", threadId: "thread-1", status: "completed" } },
+  });
+
+  await waitFor(() => stopCalls === 1);
+  bot.stop();
+});
+
+test("active writer в Desktop не падает в Telegram-turn и не спамит очередь", async () => {
+  assert.equal(
+    isActiveWriterError(new Error("thread thread-1 already has an active writer")),
+    true,
+  );
+
+  const sent = [];
+  const telegram = new EventEmitter();
+  telegram.sendMessage = async (chatId, text) => {
+    sent.push({ chatId, text });
+    return { message_id: sent.length };
+  };
+
+  let resumeCalls = 0;
+  const codex = new EventEmitter();
+  codex.resumeThread = async () => {
+    resumeCalls += 1;
+    throw new Error("thread thread-1 already has an active writer");
+  };
+  codex.readThread = async () => ({ thread: { status: { type: "idle" }, turns: [] } });
+  codex.listTurns = async () => ({ data: [] });
+  codex.startTurn = async () => {
+    throw new Error("не должен запускаться");
+  };
+
+  const bot = new CodexTelegramBot({
+    telegram,
+    codex,
+    stateStore: createStateStore(),
+    config: { allowedUserId: 7, desktopSyncPollMs: 1000, incomingMessageSettleMs: 1 },
+    logger: createLogger(),
+  });
+
+  await bot.handleUpdate({
+    message: { from: { id: 7 }, chat: { id: 100 }, text: "Попробуй в занятый Desktop" },
+  });
+
+  await waitFor(() => sent.some((item) => /открыт или занят/.test(item.text)));
+  await sleep(20);
+  bot.stop();
+
+  assert.equal(resumeCalls, 1);
+  assert.match(sent.at(-1).text, /открыт или занят/);
+});
+
 test("Telegram не запускает новый turn, пока Desktop-turn активен", async () => {
   const sent = [];
   const telegram = new EventEmitter();
@@ -455,7 +551,7 @@ test("Telegram не запускает новый turn, пока Desktop-turn а
 
   await waitFor(() => sent.length > 0);
   assert.equal(startTurnCalls, 0);
-  assert.match(sent.at(-1).text, /очередь/);
+  assert.match(sent.at(-1).text, /очеред/);
 });
 
 test("очередь Telegram запускается после завершения активного Desktop-turn", async () => {

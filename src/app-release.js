@@ -88,6 +88,17 @@ const RELEASE_HISTORY = [
       "File names with underscores are preserved when extracting paths for Telegram document sending.",
     ],
   },
+  {
+    id: "2026-08-23-writer-lease",
+    version: "0.1.9",
+    sequence: 9,
+    title: "Shared thread writer lease",
+    notes: [
+      "Telegram bot now keeps selected Codex chats observable without holding a writer lock forever.",
+      "Writer access is leased only for actions that write to Codex, then released after an idle timeout.",
+      "If Codex Desktop already owns the selected chat writer, Telegram reports the busy state instead of failing the request.",
+    ],
+  },
 ];
 
 const CURRENT_RELEASE = RELEASE_HISTORY.at(-1);

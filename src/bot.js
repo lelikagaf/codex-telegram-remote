@@ -94,6 +94,10 @@ function isUnmaterializedThreadError(error) {
   );
 }
 
+function isActiveWriterError(error) {
+  return /already has an active writer/i.test(String(error?.message || error || ""));
+}
+
 function extractTurnAnswer(turn) {
   const messages = Array.isArray(turn?.items) ? turn.items.filter(isAgentMessage) : [];
   const finalMessages = messages.filter(
@@ -504,8 +508,11 @@ class CodexTelegramBot {
     this.telegramFinalDeliveryPromises = new Map();
     this.documentBatches = new Map();
     this.incomingMessageSettleMs = Number(config.incomingMessageSettleMs) || INCOMING_MESSAGE_SETTLE_MS;
+    this.writerIdleMs = Number(config.writerIdleMs) || 90_000;
+    this.writerReleaseTimer = null;
     this.pendingPromptQueues = new Map();
     this.drainingPromptThreads = new Set();
+    this.busyQueueNotices = new Set();
 
     this.codex.on("notification", (message) => {
       this.#onCodexNotification(message).catch((error) =>
@@ -557,6 +564,7 @@ class CodexTelegramBot {
       );
     }, this.config.desktopSyncPollMs);
     this.desktopSyncTimer.unref?.();
+    this.#scheduleWriterRelease("startup");
   }
 
   #initializeTelegramFinalDeliveryTracking() {
@@ -576,11 +584,66 @@ class CodexTelegramBot {
 
   stop() {
     if (this.desktopSyncTimer) clearInterval(this.desktopSyncTimer);
+    if (this.writerReleaseTimer) clearTimeout(this.writerReleaseTimer);
     this.desktopSyncTimer = null;
+    this.writerReleaseTimer = null;
     for (const batch of this.documentBatches.values()) {
       if (batch.timer) clearTimeout(batch.timer);
     }
     this.documentBatches.clear();
+    this.busyQueueNotices.clear();
+  }
+
+  #busyQueueNoticeKey(threadId, chatId, text) {
+    return `${threadId}\u0000${chatId}\u0000${String(text || "").slice(0, 500)}`;
+  }
+
+  async #notifyQueuedBusyOnce(threadId, chatId, text, message) {
+    const key = this.#busyQueueNoticeKey(threadId, chatId, text);
+    if (this.busyQueueNotices.has(key)) return;
+    this.busyQueueNotices.add(key);
+    await this.telegram.sendMessage(chatId, message);
+  }
+
+  #cancelWriterRelease() {
+    if (!this.writerReleaseTimer) return;
+    clearTimeout(this.writerReleaseTimer);
+    this.writerReleaseTimer = null;
+  }
+
+  #hasPendingPromptWork() {
+    return [...this.pendingPromptQueues.values()].some((queue) => queue?.length);
+  }
+
+  #hasWriterWork() {
+    return (
+      this.activeByThread.size > 0 ||
+      this.pendingApprovals.size > 0 ||
+      this.#hasPendingPromptWork() ||
+      this.drainingPromptThreads.size > 0 ||
+      this.desktopSyncRunning
+    );
+  }
+
+  #scheduleWriterRelease(reason = "idle") {
+    if (this.writerReleaseTimer) return;
+    if (this.#hasWriterWork()) return;
+    this.writerReleaseTimer = setTimeout(() => {
+      this.writerReleaseTimer = null;
+      if (this.#hasWriterWork()) return;
+      this.logger.info("Освобождаю Codex writer после простоя", { reason });
+      this.codex.stop();
+    }, this.writerIdleMs);
+    this.writerReleaseTimer.unref?.();
+  }
+
+  async #withWriterLease(fn, reason = "write") {
+    this.#cancelWriterRelease();
+    try {
+      return await fn();
+    } finally {
+      this.#scheduleWriterRelease(reason);
+    }
   }
 
   async handleUpdate(update) {
@@ -905,7 +968,10 @@ class CodexTelegramBot {
   }
 
   async #newThread(chatId, name) {
-    const result = await this.codex.startThread({ cwd: this.config.defaultCwd, name: name || null });
+    const result = await this.#withWriterLease(
+      () => this.codex.startThread({ cwd: this.config.defaultCwd, name: name || null }),
+      "new-thread",
+    );
     const thread = result.thread;
     this.desktopSyncSuspended = true;
     this.state = this.stateStore.save({
@@ -1169,6 +1235,7 @@ class CodexTelegramBot {
       }
     } finally {
       this.desktopSyncRunning = false;
+      this.#scheduleWriterRelease("desktop-sync");
     }
   }
 
@@ -1196,10 +1263,26 @@ class CodexTelegramBot {
       return;
     }
 
-    const [settings, modelResult] = await Promise.all([
-      this.codex.getThreadModelSettings(threadId),
-      this.codex.listModels({ includeHidden: true }),
-    ]);
+    let settings;
+    let modelResult;
+    try {
+      [settings, modelResult] = await this.#withWriterLease(
+        () => Promise.all([
+          this.codex.getThreadModelSettings(threadId),
+          this.codex.listModels({ includeHidden: true }),
+        ]),
+        "model-settings",
+      );
+    } catch (error) {
+      if (isActiveWriterError(error)) {
+        await this.telegram.sendMessage(
+          chatId,
+          "⏳ Этот чат сейчас открыт или занят в приложении Codex. Настройки модели можно менять, когда Desktop отпустит чат.",
+        );
+        return;
+      }
+      throw error;
+    }
     const models = modelResult.data || [];
     const tokens = String(argument || "").trim().split(/\s+/).filter(Boolean);
 
@@ -1261,10 +1344,25 @@ class CodexTelegramBot {
       requestedEffort = selectedModel.defaultReasoningEffort;
     }
 
-    const updated = await this.codex.updateThreadModelSettings(threadId, {
-      ...(requestedModel ? { model: requestedModel } : {}),
-      ...(requestedEffort ? { reasoningEffort: requestedEffort } : {}),
-    });
+    let updated;
+    try {
+      updated = await this.#withWriterLease(
+        () => this.codex.updateThreadModelSettings(threadId, {
+          ...(requestedModel ? { model: requestedModel } : {}),
+          ...(requestedEffort ? { reasoningEffort: requestedEffort } : {}),
+        }),
+        "model-settings",
+      );
+    } catch (error) {
+      if (isActiveWriterError(error)) {
+        await this.telegram.sendMessage(
+          chatId,
+          "⏳ Этот чат сейчас открыт или занят в приложении Codex. Настройки модели можно менять, когда Desktop отпустит чат.",
+        );
+        return;
+      }
+      throw error;
+    }
     await this.telegram.sendLongMessage(
       chatId,
       `✅ Настройки обновлены.\n\n${formatModelSettings(updated, models)}`,
@@ -1290,6 +1388,7 @@ class CodexTelegramBot {
     const queue = this.pendingPromptQueues.get(threadId) || [];
     queue.push({ chatId, text });
     this.pendingPromptQueues.set(threadId, queue);
+    if (options.silent) return false;
     const prefix = options.messagePrefix || "⏳ Codex уже работает. Задача поставлена в очередь";
     await this.telegram.sendMessage(
       chatId,
@@ -1315,6 +1414,7 @@ class CodexTelegramBot {
       await this.#sendPrompt(next.chatId, next.text, { queueWhenBusy: true });
     } finally {
       this.drainingPromptThreads.delete(threadId);
+      this.#scheduleWriterRelease("queue-drain");
     }
   }
 
@@ -1325,7 +1425,7 @@ class CodexTelegramBot {
       return false;
     }
     if (this.activeByThread.has(threadId)) {
-      if (options.queueWhenBusy) return this.#queuePrompt(threadId, chatId, text);
+      if (options.queueWhenBusy) return this.#queuePrompt(threadId, chatId, text, { silent: true });
       await this.telegram.sendMessage(
         chatId,
         "В этом чате уже выполняется задача. Используй /steer текст или /stop.",
@@ -1333,16 +1433,53 @@ class CodexTelegramBot {
       return false;
     }
 
-    await this.codex.resumeThread(threadId);
-    const [current, recentTurns] = await Promise.all([
-      this.codex.readThread(threadId, false),
-      this.codex.listTurns(threadId, { limit: 20, itemsView: "summary" }).catch((error) => {
-        if (isUnmaterializedThreadError(error)) return { data: [] };
-        throw error;
-      }),
-    ]);
+    this.#cancelWriterRelease();
+    let current;
+    let recentTurns;
+    try {
+      await this.codex.resumeThread(threadId);
+      [current, recentTurns] = await Promise.all([
+        this.codex.readThread(threadId, false),
+        this.codex.listTurns(threadId, { limit: 20, itemsView: "summary" }).catch((error) => {
+          if (isUnmaterializedThreadError(error)) return { data: [] };
+          throw error;
+        }),
+      ]);
+    } catch (error) {
+      if (isActiveWriterError(error)) {
+        if (options.queueWhenBusy) {
+          await this.#notifyQueuedBusyOnce(
+            threadId,
+            chatId,
+            text,
+            "⏳ Этот чат сейчас открыт или занят в приложении Codex. Задача остаётся в очереди.",
+          );
+          return this.#queuePrompt(threadId, chatId, text, { silent: true });
+        }
+        await this.telegram.sendMessage(
+          chatId,
+          [
+            "⏳ Этот чат сейчас открыт или занят в приложении Codex.",
+            "Сообщение можно отправить позже, когда Desktop отпустит чат.",
+          ].join("\n"),
+        );
+        this.#scheduleWriterRelease("active-writer");
+        return false;
+      }
+      this.#scheduleWriterRelease("resume-error");
+      throw error;
+    }
     if (isThreadBusy(current.thread) || hasActiveTurn(recentTurns.data)) {
-      if (options.queueWhenBusy) return this.#queuePrompt(threadId, chatId, text);
+      if (options.queueWhenBusy) {
+        await this.#notifyQueuedBusyOnce(
+          threadId,
+          chatId,
+          text,
+          "⏳ Этот чат сейчас занят в приложении Codex. Задача остаётся в очереди.",
+        );
+        return this.#queuePrompt(threadId, chatId, text, { silent: true });
+      }
+      this.#scheduleWriterRelease("busy-thread");
       await this.telegram.sendMessage(
         chatId,
         [
@@ -1354,6 +1491,7 @@ class CodexTelegramBot {
     }
 
     const progress = await this.telegram.sendMessage(chatId, "⏳ Codex начинает работу…");
+    this.busyQueueNotices.delete(this.#busyQueueNoticeKey(threadId, chatId, text));
     const context = {
       chatId,
       threadId,
@@ -1373,6 +1511,7 @@ class CodexTelegramBot {
       return true;
     } catch (error) {
       this.activeByThread.delete(threadId);
+      this.#scheduleWriterRelease("turn-start-error");
       await this.telegram.editMessage(chatId, progress.message_id, `❌ ${error.message}`);
       return false;
     }
@@ -1388,7 +1527,10 @@ class CodexTelegramBot {
       await this.telegram.sendMessage(chatId, "Формат: /steer дополнительное указание");
       return;
     }
-    await this.codex.steerTurn(active.threadId, active.turnId, text);
+    await this.#withWriterLease(
+      () => this.codex.steerTurn(active.threadId, active.turnId, text),
+      "steer",
+    );
     await this.telegram.sendMessage(chatId, "↪️ Уточнение передано в текущую задачу.");
   }
 
@@ -1398,7 +1540,10 @@ class CodexTelegramBot {
       await this.telegram.sendMessage(chatId, "Нет активной задачи.");
       return;
     }
-    await this.codex.interruptTurn(active.threadId, active.turnId);
+    await this.#withWriterLease(
+      () => this.codex.interruptTurn(active.threadId, active.turnId),
+      "stop",
+    );
     await this.telegram.sendMessage(chatId, "⏹ Остановка запрошена.");
   }
 
@@ -1427,6 +1572,7 @@ class CodexTelegramBot {
       this.codex.respond(approval.id, { decision: accepted ? "accept" : "decline" });
     }
     this.pendingApprovals.delete(approval.id);
+    this.#scheduleWriterRelease("approval-resolved");
     await this.telegram.sendMessage(chatId, accepted ? "✅ Действие разрешено." : "🚫 Действие отклонено.");
   }
 
@@ -1466,7 +1612,10 @@ class CodexTelegramBot {
 
     if (method === "serverRequest/resolved") {
       const requestId = params.requestId;
-      if (requestId !== undefined) this.pendingApprovals.delete(requestId);
+      if (requestId !== undefined) {
+        this.pendingApprovals.delete(requestId);
+        this.#scheduleWriterRelease("approval-resolved");
+      }
     }
   }
 
@@ -1522,6 +1671,7 @@ class CodexTelegramBot {
     }
 
     await this.#drainPromptQueue(context.threadId);
+    this.#scheduleWriterRelease("turn-finished");
   }
 
   async #onServerRequest(message) {
@@ -1570,6 +1720,7 @@ class CodexTelegramBot {
   }
 
   async #onCodexDisconnected(error) {
+    this.#cancelWriterRelease();
     this.logger.warn("Codex app-server отключился", error.message);
     const contexts = [...this.activeByThread.values()];
     this.activeByThread.clear();
@@ -1618,6 +1769,7 @@ module.exports = {
   isAgentMessage,
   isActiveTurnStatus,
   isDesktopTurnSettled,
+  isActiveWriterError,
   isTerminalTurnStatus,
   isThreadBusy,
   isUnmaterializedThreadError,

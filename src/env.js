@@ -107,6 +107,8 @@ function loadConfig(projectRoot) {
       Math.max(30, Number(process.env.RESUME_NOTIFICATION_GAP_SECONDS) || 120) * 1000,
     desktopSyncPollMs:
       Math.max(2, Number(process.env.DESKTOP_SYNC_POLL_SECONDS) || 3) * 1000,
+    writerIdleMs:
+      Math.max(5, Number(process.env.CODEX_WRITER_IDLE_SECONDS) || 90) * 1000,
     logLevel: (process.env.LOG_LEVEL || "info").toLowerCase(),
     statePath: path.join(projectRoot, "data", "state.json"),
     logPath: path.join(projectRoot, "logs", "bot.log"),
