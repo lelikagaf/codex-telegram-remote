@@ -22,6 +22,50 @@ test("app-server starts with default cwd as an additional sandbox directory", ()
   );
 });
 
+test("full access starts app-server without approvals and sandbox", () => {
+  assert.deepEqual(
+    buildCodexAppServerArgs({
+      argsPrefix: [],
+      approvalPolicy: "on-request",
+      fullAccess: true,
+      cwd: "C:\\Users\\lelik\\Documents\\Codex",
+    }),
+    [
+      "--dangerously-bypass-approvals-and-sandbox",
+      "--add-dir",
+      "C:\\Users\\lelik\\Documents\\Codex",
+      "app-server",
+      "--stdio",
+    ],
+  );
+});
+
+test("full access overrides approval and sandbox policy for every turn", async () => {
+  const client = new CodexClient({
+    launch: {},
+    cwd: "C:\\Project",
+    fullAccess: true,
+    logger: { info() {}, debug() {}, warn() {}, error() {} },
+  });
+  let captured;
+  client.request = async (method, params) => {
+    captured = { method, params };
+    return { turn: { id: "turn-full-access" } };
+  };
+
+  await client.startTurn("thread-1", "Сделай");
+
+  assert.deepEqual(captured, {
+    method: "turn/start",
+    params: {
+      threadId: "thread-1",
+      input: [{ type: "text", text: "Сделай" }],
+      approvalPolicy: "never",
+      sandboxPolicy: { type: "dangerFullAccess" },
+    },
+  });
+});
+
 test("model settings are read, cached and updated through app-server", async () => {
   const calls = [];
   const client = new CodexClient({

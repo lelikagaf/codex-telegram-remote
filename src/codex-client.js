@@ -2,12 +2,18 @@ const { EventEmitter } = require("node:events");
 const { spawn } = require("node:child_process");
 const readline = require("node:readline");
 
-function buildCodexAppServerArgs({ argsPrefix = [], approvalPolicy = "never", cwd }) {
-  const args = [
-    ...argsPrefix,
-    "--ask-for-approval",
-    approvalPolicy,
-  ];
+function buildCodexAppServerArgs({
+  argsPrefix = [],
+  approvalPolicy = "never",
+  fullAccess = false,
+  cwd,
+}) {
+  const args = [...argsPrefix];
+  if (fullAccess) {
+    args.push("--dangerously-bypass-approvals-and-sandbox");
+  } else {
+    args.push("--ask-for-approval", approvalPolicy);
+  }
   if (cwd) {
     args.push("--add-dir", cwd);
   }
@@ -26,11 +32,12 @@ class CodexRpcError extends Error {
 }
 
 class CodexClient extends EventEmitter {
-  constructor({ launch, cwd, approvalPolicy = "never", logger }) {
+  constructor({ launch, cwd, approvalPolicy = "never", fullAccess = false, logger }) {
     super();
     this.launch = launch;
     this.cwd = cwd;
     this.approvalPolicy = approvalPolicy;
+    this.fullAccess = fullAccess;
     this.logger = logger;
     this.child = null;
     this.lineReader = null;
@@ -65,6 +72,7 @@ class CodexClient extends EventEmitter {
       buildCodexAppServerArgs({
         argsPrefix: this.launch.argsPrefix,
         approvalPolicy: this.approvalPolicy,
+        fullAccess: this.fullAccess,
         cwd: this.cwd,
       }),
       {
@@ -285,9 +293,15 @@ class CodexClient extends EventEmitter {
   }
 
   startTurn(threadId, text) {
+    const accessOverrides = this.fullAccess
+      ? {
+          approvalPolicy: "never",
+          sandboxPolicy: { type: "dangerFullAccess" },
+        }
+      : {};
     return this.request(
       "turn/start",
-      { threadId, input: [{ type: "text", text }] },
+      { threadId, input: [{ type: "text", text }], ...accessOverrides },
       120000,
     );
   }

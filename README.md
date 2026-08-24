@@ -110,6 +110,7 @@ TELEGRAM_ALLOWED_USER_ID=
 CODEX_DEFAULT_CWD=
 CODEX_BINARY=
 CODEX_APPROVAL_POLICY=never
+CODEX_FULL_ACCESS=false
 TELEGRAM_NOTIFY_ON_START=true
 TELEGRAM_NOTIFY_AFTER_SLEEP=false
 TELEGRAM_MAX_FILE_SIZE_MB=0
@@ -183,6 +184,9 @@ powershell -ExecutionPolicy Bypass -File .\scripts\uninstall-autostart.ps1
 - `/approve` разрешает действие внутри Codex, но не обходит Windows UAC.
 - По умолчанию `CODEX_APPROVAL_POLICY=never` отключает частые запросы
   подтверждения, но не включает опасный обход sandbox.
+- `CODEX_FULL_ACCESS=true` дополнительно отключает sandbox и принудительно
+  задаёт `approvalPolicy: never` и `sandboxPolicy: dangerFullAccess` для каждого
+  задания из Telegram. Используйте только для бота с проверенным владельцем.
 - Бот получает доступ к тем же файлам, что и вошедший пользователь Windows.
 - Не запускайте весь бот с постоянными правами администратора.
 - Не храните рабочий экземпляр на общедоступном сетевом диске.

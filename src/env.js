@@ -99,6 +99,7 @@ function loadConfig(projectRoot) {
     allowedUserId,
     codexBinary: (process.env.CODEX_BINARY || "").trim() || null,
     codexApprovalPolicy: parseApprovalPolicy(process.env.CODEX_APPROVAL_POLICY),
+    codexFullAccess: parseBoolean(process.env.CODEX_FULL_ACCESS, false),
     defaultCwd,
     notifyOnStart: parseBoolean(process.env.TELEGRAM_NOTIFY_ON_START, true),
     notifyAfterSleep: parseBoolean(process.env.TELEGRAM_NOTIFY_AFTER_SLEEP, false),
