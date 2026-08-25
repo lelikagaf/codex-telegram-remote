@@ -18,6 +18,8 @@ class StateStore {
       telegramTurnIds: [],
       telegramPendingFinals: [],
       telegramFinalDeliveredTurnIds: null,
+      telegramTopicThreads: {},
+      telegramThreadTopics: {},
     };
   }
 

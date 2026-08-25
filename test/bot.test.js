@@ -49,6 +49,8 @@ function createStateStore(overrides = {}) {
       telegramTurnIds: [],
       telegramPendingFinals: [],
       telegramFinalDeliveredTurnIds: [],
+      telegramTopicThreads: {},
+      telegramThreadTopics: {},
       ...overrides,
     },
     save(patch) {
@@ -625,6 +627,123 @@ test("режим fork продолжает занятый Desktop-чат и за
   assert.deepEqual(started, [{ threadId: "thread-fork", text: "Продолжай удалённо" }]);
   assert.equal(stateStore.state.currentThreadId, "thread-fork");
   assert.equal(sent.some((item) => /Создано продолжение/.test(item.text)), true);
+});
+
+test("/sync_topics creates Telegram topics and stores Codex mapping", async () => {
+  const sent = [];
+  const createdTopics = [];
+  const telegram = new EventEmitter();
+  telegram.sendMessage = async (chatId, text) => {
+    sent.push({ chatId, text });
+    return { message_id: sent.length };
+  };
+  telegram.createForumTopic = async (chatId, name) => {
+    createdTopics.push({ chatId, name });
+    return { message_thread_id: 700 + createdTopics.length, name };
+  };
+
+  const codex = new EventEmitter();
+  codex.listThreads = async () => ({
+    data: [
+      { id: "thread-a", name: "Alpha", status: { type: "idle" } },
+      { id: "thread-b", name: "Beta", status: { type: "idle" } },
+    ],
+  });
+
+  const stateStore = createStateStore({ currentThreadId: null });
+  const bot = new CodexTelegramBot({
+    telegram,
+    codex,
+    stateStore,
+    config: { allowedUserId: 7, desktopSyncPollMs: 1000 },
+    logger: createLogger(),
+  });
+
+  await bot.handleUpdate({
+    message: { from: { id: 7 }, chat: { id: 100 }, text: "/sync_topics 2" },
+  });
+
+  assert.deepEqual(createdTopics, [
+    { chatId: 100, name: "Alpha" },
+    { chatId: 100, name: "Beta" },
+  ]);
+  assert.equal(stateStore.state.telegramTopicThreads["100:701"].threadId, "thread-a");
+  assert.equal(stateStore.state.telegramThreadTopics["100:thread-b"].messageThreadId, 702);
+  assert.match(sent.at(-1).text, /Создано: 2/);
+});
+
+test("Telegram topic routes prompt and final answer to mapped Codex chat", async () => {
+  const sent = [];
+  const telegram = new EventEmitter();
+  telegram.sendMessage = async (chatId, text) => {
+    sent.push({ kind: "message", chatId, text });
+    return { message_id: sent.length };
+  };
+  telegram.sendLongMessage = async (chatId, text) => {
+    sent.push({ kind: "final", chatId, text });
+    return [{ message_id: sent.length }];
+  };
+  telegram.editMessage = async (chatId, messageId, text) => {
+    sent.push({ kind: "edit", chatId, messageId, text });
+  };
+
+  const started = [];
+  const codex = new EventEmitter();
+  codex.resumeThread = async () => {};
+  codex.readThread = async () => ({ thread: { status: { type: "idle" }, turns: [] } });
+  codex.listTurns = async () => ({ data: [] });
+  codex.startTurn = async (threadId, text) => {
+    started.push({ threadId, text });
+    return { turn: { id: "topic-turn" } };
+  };
+
+  const stateStore = createStateStore({
+    currentThreadId: "fallback-thread",
+    telegramTopicThreads: {
+      "100:77": {
+        chatId: 100,
+        messageThreadId: 77,
+        threadId: "topic-thread",
+        threadName: "Topic Thread",
+      },
+    },
+  });
+  const bot = new CodexTelegramBot({
+    telegram,
+    codex,
+    stateStore,
+    config: { allowedUserId: 7, desktopSyncPollMs: 1000, incomingMessageSettleMs: 1 },
+    logger: createLogger(),
+  });
+
+  await bot.handleUpdate({
+    message: {
+      from: { id: 7 },
+      chat: { id: 100 },
+      message_thread_id: 77,
+      text: "Сделай в topic",
+    },
+  });
+
+  await waitFor(() => started.length === 1);
+  assert.deepEqual(started, [{ threadId: "topic-thread", text: "Сделай в topic" }]);
+  codex.emit("notification", {
+    method: "item/completed",
+    params: {
+      threadId: "topic-thread",
+      turnId: "topic-turn",
+      item: { id: "answer-1", type: "agentMessage", phase: "final_answer", text: "Topic done" },
+    },
+  });
+  codex.emit("notification", {
+    method: "turn/completed",
+    params: { turn: { id: "topic-turn", threadId: "topic-thread", status: "completed" } },
+  });
+
+  await waitFor(() => sent.some((item) => item.kind === "final"));
+  const final = sent.find((item) => item.kind === "final");
+  assert.deepEqual(final.chatId, { chatId: 100, messageThreadId: 77 });
+  assert.equal(final.text, "Topic done");
 });
 
 test("Telegram не запускает новый turn, пока Desktop-turn активен", async () => {

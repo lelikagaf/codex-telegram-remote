@@ -112,6 +112,17 @@ const RELEASE_HISTORY = [
       "Read-only history polling now works after the Telegram app-server unsubscribes.",
     ],
   },
+  {
+    id: "2026-08-25-telegram-topics",
+    version: "0.1.11",
+    sequence: 11,
+    title: "Telegram topics for Codex chats",
+    notes: [
+      "Added /sync_topics to create Telegram topics for recent Codex chats.",
+      "Incoming Telegram topic messages are routed to the mapped Codex chat without using /use.",
+      "Codex replies and generated documents are sent back to the same Telegram topic.",
+    ],
+  },
 ];
 
 const CURRENT_RELEASE = RELEASE_HISTORY.at(-1);

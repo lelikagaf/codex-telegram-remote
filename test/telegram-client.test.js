@@ -12,6 +12,29 @@ function createLogger() {
   return { debug() {}, info() {}, warn() {}, error() {} };
 }
 
+test("sendMessage routes messages to Telegram topic", async () => {
+  const client = new TelegramClient({ token: "test-token", logger: createLogger() });
+  const calls = [];
+  client.call = async (method, payload) => {
+    calls.push({ method, payload });
+    return { message_id: 1 };
+  };
+
+  await client.sendMessage({ chatId: 100, messageThreadId: 77 }, "hello");
+
+  assert.deepEqual(calls, [
+    {
+      method: "sendMessage",
+      payload: {
+        chat_id: 100,
+        message_thread_id: 77,
+        text: "hello",
+        disable_web_page_preview: true,
+      },
+    },
+  ]);
+});
+
 test("downloadFile атомарно сохраняет документ при безлимитной настройке", async (t) => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "codex-telegram-file-"));
   t.after(() => fs.rmSync(directory, { recursive: true, force: true }));

@@ -130,22 +130,45 @@ class TelegramClient extends EventEmitter {
     return this.call("setMyCommands", { commands });
   }
 
+  createForumTopic(chatId, name, extra = {}) {
+    return this.call("createForumTopic", {
+      chat_id: chatId,
+      name: String(name || "").slice(0, 128),
+      ...extra,
+    });
+  }
+
+  #targetPayload(chatIdOrTarget, extra = {}) {
+    if (
+      chatIdOrTarget &&
+      typeof chatIdOrTarget === "object" &&
+      Object.hasOwn(chatIdOrTarget, "chatId")
+    ) {
+      return {
+        chat_id: chatIdOrTarget.chatId,
+        ...(chatIdOrTarget.messageThreadId
+          ? { message_thread_id: chatIdOrTarget.messageThreadId }
+          : {}),
+        ...extra,
+      };
+    }
+    return { chat_id: chatIdOrTarget, ...extra };
+  }
+
   sendMessage(chatId, text, extra = {}) {
     return this.call("sendMessage", {
-      chat_id: chatId,
+      ...this.#targetPayload(chatId, extra),
       text: String(text).slice(0, 4096),
       disable_web_page_preview: true,
-      ...extra,
     });
   }
 
   editMessage(chatId, messageId, text, extra = {}) {
     return this.call("editMessageText", {
-      chat_id: chatId,
+      ...this.#targetPayload(chatId, extra),
       message_id: messageId,
       text: String(text).slice(0, 4096),
       disable_web_page_preview: true,
-      ...extra,
     });
   }
 
@@ -167,10 +190,19 @@ class TelegramClient extends EventEmitter {
   async sendDocument(chatId, filePath, extra = {}, timeoutMs = 600000) {
     const form = new FormData();
     const buffer = await fs.promises.readFile(filePath);
-    form.set("chat_id", String(chatId));
+    const target = this.#targetPayload(chatId, extra);
+    form.set("chat_id", String(target.chat_id));
+    if (target.message_thread_id) form.set("message_thread_id", String(target.message_thread_id));
     form.set("document", new Blob([buffer]), path.basename(filePath));
-    for (const [key, value] of Object.entries(extra || {})) {
-      if (value !== undefined && value !== null) form.set(key, String(value));
+    for (const [key, value] of Object.entries(target)) {
+      if (
+        key !== "chat_id" &&
+        key !== "message_thread_id" &&
+        value !== undefined &&
+        value !== null
+      ) {
+        form.set(key, String(value));
+      }
     }
 
     const controller = new AbortController();
