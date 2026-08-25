@@ -111,6 +111,7 @@ CODEX_DEFAULT_CWD=
 CODEX_BINARY=
 CODEX_APPROVAL_POLICY=never
 CODEX_FULL_ACCESS=false
+CODEX_ACTIVE_WRITER_MODE=queue
 TELEGRAM_NOTIFY_ON_START=true
 TELEGRAM_NOTIFY_AFTER_SLEEP=false
 TELEGRAM_MAX_FILE_SIZE_MB=0
@@ -127,6 +128,9 @@ LOG_LEVEL=info
 старых и новых чатов и каждого хода, запущенного через Telegram. При значении
 `false` действует `CODEX_APPROVAL_POLICY`, где доступны `never`, `on-request`
 и `untrusted`.
+`CODEX_ACTIVE_WRITER_MODE=queue` ждёт, пока Codex Desktop освободит выбранный
+чат. Значение `fork` автоматически создаёт продолжение с той же историей и
+выполняет Telegram-задачу там, если Desktop удерживает исходный writer.
 `TELEGRAM_MAX_FILE_SIZE_MB` задаёт максимальный размер загружаемого документа в
 мегабайтах. Значения `0` и `-1` отключают ограничение со стороны бота. При этом
 могут сохраняться собственные технические ограничения Telegram Bot API.

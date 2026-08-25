@@ -108,6 +108,8 @@ const RELEASE_HISTORY = [
       "Full access is applied to the app-server, old and new threads, and every Telegram-started turn.",
       "Telegram unsubscribes from a thread after work so Codex Desktop can open it immediately.",
       "Added /access, /unlock and remote answers for Codex and MCP questions.",
+      "Added an optional automatic fork when Codex Desktop keeps the original thread writer.",
+      "Read-only history polling now works after the Telegram app-server unsubscribes.",
     ],
   },
 ];

@@ -49,6 +49,14 @@ function parseApprovalPolicy(value) {
   throw error;
 }
 
+function parseActiveWriterMode(value) {
+  const mode = String(value || "queue").trim().toLowerCase();
+  if (["queue", "fork"].includes(mode)) return mode;
+  const error = new Error("CODEX_ACTIVE_WRITER_MODE должен быть queue или fork.");
+  error.exitCode = 78;
+  throw error;
+}
+
 function parseFileSizeLimitMb(value, fallback = 0) {
   const raw = value === undefined || String(value).trim() === "" ? fallback : Number(value);
   if (!Number.isFinite(raw) || raw < -1 || (raw < 0 && raw !== -1)) {
@@ -100,6 +108,7 @@ function loadConfig(projectRoot) {
     codexBinary: (process.env.CODEX_BINARY || "").trim() || null,
     codexApprovalPolicy: parseApprovalPolicy(process.env.CODEX_APPROVAL_POLICY),
     codexFullAccess: parseBoolean(process.env.CODEX_FULL_ACCESS, false),
+    activeWriterMode: parseActiveWriterMode(process.env.CODEX_ACTIVE_WRITER_MODE),
     defaultCwd,
     notifyOnStart: parseBoolean(process.env.TELEGRAM_NOTIFY_ON_START, true),
     notifyAfterSleep: parseBoolean(process.env.TELEGRAM_NOTIFY_AFTER_SLEEP, false),
@@ -121,6 +130,7 @@ module.exports = {
   loadConfig,
   loadEnvFile,
   parseApprovalPolicy,
+  parseActiveWriterMode,
   parseBoolean,
   parseEnv,
   parseFileSizeLimitMb,

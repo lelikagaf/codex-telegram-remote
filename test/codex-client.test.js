@@ -119,6 +119,9 @@ test("full access is applied to new threads, resumed threads and every turn", as
     if (method === "thread/resume") {
       return { model: "gpt-5.6-sol", reasoningEffort: "high" };
     }
+    if (method === "thread/fork") {
+      return { thread: { id: "thread-fork" }, model: "gpt-5.6-sol", reasoningEffort: "high" };
+    }
     if (method === "turn/start") return { turn: { id: "turn-1" } };
     if (method === "thread/unsubscribe") return { status: "unsubscribed" };
     return {};
@@ -128,8 +131,10 @@ test("full access is applied to new threads, resumed threads and every turn", as
   await client.startThread({ cwd: "C:\\Project" });
   await client.unsubscribeThread("thread-new");
   await client.resumeThread("thread-old");
+  await client.forkThread("thread-locked");
   await client.startTurn("thread-old", "Do it");
   await client.unsubscribeThread("thread-old");
+  await client.unsubscribeThread("thread-fork");
 
   assert.deepEqual(calls, [
     {
@@ -151,6 +156,14 @@ test("full access is applied to new threads, resumed threads and every turn", as
       },
     },
     {
+      method: "thread/fork",
+      params: {
+        threadId: "thread-locked",
+        approvalPolicy: "never",
+        sandbox: "danger-full-access",
+      },
+    },
+    {
       method: "turn/start",
       params: {
         threadId: "thread-old",
@@ -160,6 +173,32 @@ test("full access is applied to new threads, resumed threads and every turn", as
       },
     },
     { method: "thread/unsubscribe", params: { threadId: "thread-old" } },
+    { method: "thread/unsubscribe", params: { threadId: "thread-fork" } },
   ]);
   assert.equal(client.loadedThreadCount, 0);
+});
+
+test("listTurns falls back to persisted thread history without a writer", async () => {
+  const client = new CodexClient({
+    launch: {},
+    cwd: "C:\\Project",
+    logger: { info() {}, debug() {}, warn() {}, error() {} },
+  });
+  client.request = async (method) => {
+    if (method === "thread/turns/list") throw new Error("thread not loaded: thread-1");
+    if (method === "thread/read") {
+      return {
+        thread: {
+          turns: [
+            { id: "older", status: "completed", startedAt: 10 },
+            { id: "newer", status: "completed", startedAt: 20 },
+          ],
+        },
+      };
+    }
+    return {};
+  };
+
+  const result = await client.listTurns("thread-1", { limit: 1 });
+  assert.deepEqual(result.data.map((turn) => turn.id), ["newer"]);
 });

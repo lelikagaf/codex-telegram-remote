@@ -226,13 +226,27 @@ class CodexClient extends EventEmitter {
     return this.request("thread/read", { threadId, includeTurns });
   }
 
-  listTurns(threadId, { limit = 50, itemsView = "full" } = {}) {
-    return this.request("thread/turns/list", {
-      threadId,
-      limit,
-      sortDirection: "desc",
-      itemsView,
-    });
+  async listTurns(threadId, { limit = 50, itemsView = "full" } = {}) {
+    try {
+      return await this.request("thread/turns/list", {
+        threadId,
+        limit,
+        sortDirection: "desc",
+        itemsView,
+      });
+    } catch (error) {
+      if (!/thread not loaded/i.test(String(error?.message || error))) throw error;
+
+      // thread/read can inspect persisted history without acquiring the thread writer.
+      const result = await this.readThread(threadId, true);
+      const turns = Array.isArray(result.thread?.turns) ? [...result.thread.turns] : [];
+      turns.sort((left, right) => {
+        const leftTime = left.completedAt || left.startedAt || 0;
+        const rightTime = right.completedAt || right.startedAt || 0;
+        return rightTime - leftTime || String(right.id || "").localeCompare(String(left.id || ""));
+      });
+      return { data: turns.slice(0, limit), nextCursor: null };
+    }
   }
 
   async resumeThread(threadId) {
@@ -277,6 +291,31 @@ class CodexClient extends EventEmitter {
     });
     if (name) {
       await this.request("thread/name/set", { threadId, name });
+      result.thread.name = name;
+    }
+    return result;
+  }
+
+  async forkThread(threadId, { name = null } = {}) {
+    const accessOverrides = this.fullAccess
+      ? { approvalPolicy: "never", sandbox: "danger-full-access" }
+      : {};
+    const result = await this.request(
+      "thread/fork",
+      {
+        threadId,
+        ...accessOverrides,
+      },
+      120000,
+    );
+    const forkedThreadId = result.thread.id;
+    this.loadedThreads.add(forkedThreadId);
+    this.threadModelSettings.set(forkedThreadId, {
+      model: result.model,
+      reasoningEffort: result.reasoningEffort ?? null,
+    });
+    if (name) {
+      await this.request("thread/name/set", { threadId: forkedThreadId, name });
       result.thread.name = name;
     }
     return result;

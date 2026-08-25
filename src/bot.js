@@ -1011,6 +1011,49 @@ class CodexTelegramBot {
     await this.telegram.sendMessage(chatId, `✅ Создан и выбран новый чат:\n${threadTitle(thread)}`);
   }
 
+  async #forkThreadForTelegram(chatId, sourceThreadId) {
+    const sourceName = this.state.currentThreadName || "Чат Codex";
+    const forkName = sourceName.endsWith(" · Telegram")
+      ? sourceName
+      : `${sourceName} · Telegram`;
+    const result = await this.codex.forkThread(sourceThreadId, { name: forkName });
+    const thread = result.thread;
+
+    const remainingQueue = this.pendingPromptQueues.get(sourceThreadId);
+    if (remainingQueue?.length) {
+      this.pendingPromptQueues.delete(sourceThreadId);
+      this.pendingPromptQueues.set(thread.id, [
+        ...(this.pendingPromptQueues.get(thread.id) || []),
+        ...remainingQueue,
+      ]);
+    }
+
+    this.desktopSyncSuspended = true;
+    this.state = this.stateStore.save({
+      currentThreadId: thread.id,
+      currentThreadName: threadTitle(thread),
+      lastChatId: chatId,
+      desktopSyncThreadId: null,
+      desktopSyncSeenTurnIds: null,
+      desktopSyncSentUserMessageIds: null,
+      desktopSyncSentUserTurnIds: null,
+    });
+    try {
+      await this.#resetDesktopSyncBaseline(thread.id);
+    } finally {
+      this.desktopSyncSuspended = false;
+    }
+    await this.telegram.sendMessage(
+      chatId,
+      [
+        "🔀 Исходный чат удерживается Codex Desktop.",
+        `Создано продолжение с той же историей: ${threadTitle(thread)}.`,
+        "Запускаю задачу в нём.",
+      ].join("\n"),
+    );
+    return thread.id;
+  }
+
   async #initializeDesktopSync() {
     const threadId = this.state.currentThreadId;
     if (!threadId || !this.state.lastChatId) return;
@@ -1400,6 +1443,7 @@ class CodexTelegramBot {
       `Ожидает взаимодействия: ${approvals.length}`,
       `Полный доступ: ${this.config.codexFullAccess ? "включён" : "выключен"}`,
       `Подтверждения: ${this.config.codexFullAccess ? "never" : this.config.codexApprovalPolicy}`,
+      `Конфликт с Desktop: ${this.config.activeWriterMode || "queue"}`,
       `Загружено ботом чатов: ${this.codex.loadedThreadCount ?? "неизвестно"}`,
     ];
     await this.telegram.sendMessage(chatId, lines.join("\n"));
@@ -1413,6 +1457,7 @@ class CodexTelegramBot {
         `Режим: ${fullAccess ? "ПОЛНЫЙ ДОСТУП" : "ограниченный"}`,
         `Подтверждения Codex: ${fullAccess ? "never" : this.config.codexApprovalPolicy}`,
         `Песочница: ${fullAccess ? "danger-full-access" : "по настройкам Codex"}`,
+        `Конфликт writer с Desktop: ${this.config.activeWriterMode || "queue"}`,
         "Область: каждый новый ход через Telegram, во всех старых и новых чатах.",
         "Computer Use и плагины наследуются от Codex; отдельные системные ограничения Windows и приложений сохраняются.",
       ].join("\n"),
@@ -1454,7 +1499,7 @@ class CodexTelegramBot {
   }
 
   async #sendPrompt(chatId, text, options = {}) {
-    const threadId = this.state.currentThreadId;
+    let threadId = this.state.currentThreadId;
     if (!threadId) {
       await this.telegram.sendMessage(chatId, "Сначала выбери чат командой /chats.");
       return false;
@@ -1501,7 +1546,22 @@ class CodexTelegramBot {
       await this.codex.resumeThread(threadId);
     } catch (error) {
       if (isActiveWriterError(error)) {
-        if (options.queueWhenBusy) {
+        if (this.config.activeWriterMode === "fork") {
+          try {
+            threadId = await this.#forkThreadForTelegram(chatId, threadId);
+          } catch (forkError) {
+            this.logger.warn("Не удалось создать Telegram-ветку занятого чата", {
+              threadId,
+              message: forkError.message,
+            });
+            this.#scheduleWriterRelease("fork-error");
+            await this.telegram.sendMessage(
+              chatId,
+              `❌ Не удалось создать продолжение занятого чата: ${forkError.message}`,
+            );
+            return false;
+          }
+        } else if (options.queueWhenBusy) {
           await this.#notifyQueuedBusyOnce(
             threadId,
             chatId,
@@ -1509,19 +1569,21 @@ class CodexTelegramBot {
             "⏳ Этот чат сейчас открыт или занят в приложении Codex. Задача остаётся в очереди.",
           );
           return this.#queuePrompt(threadId, chatId, text, { silent: true });
+        } else {
+          await this.telegram.sendMessage(
+            chatId,
+            [
+              "⏳ Этот чат сейчас открыт или занят в приложении Codex.",
+              "Сообщение можно отправить позже, когда Desktop отпустит чат.",
+            ].join("\n"),
+          );
+          this.#scheduleWriterRelease("active-writer");
+          return false;
         }
-        await this.telegram.sendMessage(
-          chatId,
-          [
-            "⏳ Этот чат сейчас открыт или занят в приложении Codex.",
-            "Сообщение можно отправить позже, когда Desktop отпустит чат.",
-          ].join("\n"),
-        );
-        this.#scheduleWriterRelease("active-writer");
-        return false;
+      } else {
+        this.#scheduleWriterRelease("resume-error");
+        throw error;
       }
-      this.#scheduleWriterRelease("resume-error");
-      throw error;
     }
 
     const progress = await this.telegram.sendMessage(chatId, "⏳ Codex начинает работу…");

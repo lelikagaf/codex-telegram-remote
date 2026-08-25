@@ -578,6 +578,55 @@ test("active writer в Desktop не падает в Telegram-turn и не спа
   assert.match(sent.at(-1).text, /открыт или занят/);
 });
 
+test("режим fork продолжает занятый Desktop-чат и запускает Telegram-turn", async () => {
+  const sent = [];
+  const started = [];
+  const telegram = new EventEmitter();
+  telegram.sendMessage = async (chatId, text) => {
+    sent.push({ chatId, text });
+    return { message_id: sent.length };
+  };
+  telegram.editMessage = async () => {};
+
+  const codex = new EventEmitter();
+  codex.resumeThread = async () => {
+    throw new Error("thread thread-1 already has an active writer");
+  };
+  codex.readThread = async () => ({ thread: { status: { type: "idle" }, turns: [] } });
+  codex.listTurns = async () => ({ data: [] });
+  codex.forkThread = async () => ({
+    thread: { id: "thread-fork", name: "Тест · Telegram", status: { type: "idle" } },
+  });
+  codex.startTurn = async (threadId, text) => {
+    started.push({ threadId, text });
+    return { turn: { id: "turn-fork" } };
+  };
+
+  const stateStore = createStateStore();
+  const bot = new CodexTelegramBot({
+    telegram,
+    codex,
+    stateStore,
+    config: {
+      allowedUserId: 7,
+      desktopSyncPollMs: 1000,
+      incomingMessageSettleMs: 1,
+      activeWriterMode: "fork",
+    },
+    logger: createLogger(),
+  });
+
+  await bot.handleUpdate({
+    message: { from: { id: 7 }, chat: { id: 100 }, text: "Продолжай удалённо" },
+  });
+  await waitFor(() => started.length === 1);
+  bot.stop();
+
+  assert.deepEqual(started, [{ threadId: "thread-fork", text: "Продолжай удалённо" }]);
+  assert.equal(stateStore.state.currentThreadId, "thread-fork");
+  assert.equal(sent.some((item) => /Создано продолжение/.test(item.text)), true);
+});
+
 test("Telegram не запускает новый turn, пока Desktop-turn активен", async () => {
   const sent = [];
   const telegram = new EventEmitter();

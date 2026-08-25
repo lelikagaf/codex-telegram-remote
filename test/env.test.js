@@ -1,6 +1,7 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const {
+  parseActiveWriterMode,
   parseApprovalPolicy,
   parseBoolean,
   parseEnv,
@@ -28,6 +29,12 @@ test("parseApprovalPolicy принимает известные режимы", (
 
 test("parseApprovalPolicy отклоняет неизвестный режим", () => {
   assert.throws(() => parseApprovalPolicy("always"), /CODEX_APPROVAL_POLICY/);
+});
+
+test("parseActiveWriterMode принимает очередь и fork", () => {
+  assert.equal(parseActiveWriterMode(undefined), "queue");
+  assert.equal(parseActiveWriterMode("FORK"), "fork");
+  assert.throws(() => parseActiveWriterMode("takeover"), /CODEX_ACTIVE_WRITER_MODE/);
 });
 
 test("лимит файла принимает мегабайты, 0 и -1", () => {
