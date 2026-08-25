@@ -99,6 +99,17 @@ const RELEASE_HISTORY = [
       "If Codex Desktop already owns the selected chat writer, Telegram reports the busy state instead of failing the request.",
     ],
   },
+  {
+    id: "2026-08-25-full-remote-access",
+    version: "0.1.10",
+    sequence: 10,
+    title: "Full remote access and thread release",
+    notes: [
+      "Full access is applied to the app-server, old and new threads, and every Telegram-started turn.",
+      "Telegram unsubscribes from a thread after work so Codex Desktop can open it immediately.",
+      "Added /access, /unlock and remote answers for Codex and MCP questions.",
+    ],
+  },
 ];
 
 const CURRENT_RELEASE = RELEASE_HISTORY.at(-1);

@@ -363,6 +363,62 @@ test("команда /model добавлена в меню быстрых ком
   bot.stop();
 
   assert.equal(commands.some((item) => item.command === "model"), true);
+  assert.equal(commands.some((item) => item.command === "access"), true);
+  assert.equal(commands.some((item) => item.command === "answer"), true);
+  assert.equal(commands.some((item) => item.command === "unlock"), true);
+});
+
+test("вопрос Codex можно полностью обработать через /answer", async () => {
+  const sent = [];
+  const responses = [];
+  const telegram = new EventEmitter();
+  telegram.sendMessage = async (chatId, text) => {
+    sent.push({ chatId, text });
+    return { message_id: sent.length };
+  };
+
+  const codex = new EventEmitter();
+  codex.respond = (id, result) => responses.push({ id, result });
+  const bot = new CodexTelegramBot({
+    telegram,
+    codex,
+    stateStore: createStateStore(),
+    config: { allowedUserId: 7, desktopSyncPollMs: 1000 },
+    logger: createLogger(),
+  });
+
+  codex.emit("serverRequest", {
+    id: 41,
+    method: "item/tool/requestUserInput",
+    params: {
+      threadId: "thread-1",
+      turnId: "turn-1",
+      itemId: "item-1",
+      questions: [
+        { id: "city", question: "Город?", options: null },
+        { id: "mode", question: "Режим?", options: [{ label: "Полный" }] },
+      ],
+    },
+  });
+  await waitFor(() => sent.length === 1);
+  assert.match(sent[0].text, /Город/);
+
+  await bot.handleUpdate({
+    message: { from: { id: 7 }, chat: { id: 100 }, text: "/answer Москва | Полный" },
+  });
+
+  assert.deepEqual(responses, [
+    {
+      id: 41,
+      result: {
+        answers: {
+          city: { answers: ["Москва"] },
+          mode: { answers: ["Полный"] },
+        },
+      },
+    },
+  ]);
+  assert.match(sent.at(-1).text, /передан Codex/);
 });
 
 test("финал Telegram-turn отправляется новым сообщением и подтверждается в состоянии", async () => {
@@ -382,7 +438,11 @@ test("финал Telegram-turn отправляется новым сообще�
   };
 
   const codex = new EventEmitter();
+  let unsubscribeCalls = 0;
   codex.resumeThread = async () => {};
+  codex.unsubscribeThread = async () => {
+    unsubscribeCalls += 1;
+  };
   codex.readThread = async () => ({ thread: { status: { type: "idle" }, turns: [] } });
   codex.listTurns = async () => ({ data: [] });
   codex.startTurn = async () => ({ turn: { id: "turn-1" } });
@@ -424,6 +484,7 @@ test("финал Telegram-turn отправляется новым сообще�
   );
   assert.equal(edits.at(-1).text, "✅ Codex завершил работу. Ответ отправлен следующим сообщением.");
   assert.deepEqual(stateStore.state.telegramPendingFinals, []);
+  assert.equal(unsubscribeCalls, 1);
 });
 
 test("после завершения Telegram-turn бот отпускает writer lease", async () => {
@@ -526,8 +587,11 @@ test("Telegram не запускает новый turn, пока Desktop-turn а
   };
 
   let startTurnCalls = 0;
+  let resumeCalls = 0;
   const codex = new EventEmitter();
-  codex.resumeThread = async () => {};
+  codex.resumeThread = async () => {
+    resumeCalls += 1;
+  };
   codex.readThread = async () => ({ thread: { status: { type: "idle" }, turns: [] } });
   codex.listTurns = async () => ({
     data: [{ id: "desktop-turn", status: "inProgress" }],

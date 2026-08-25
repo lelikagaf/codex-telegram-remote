@@ -101,3 +101,65 @@ test("model settings are read, cached and updated through app-server", async () 
     { method: "model/list", params: { includeHidden: true } },
   ]);
 });
+
+test("full access is applied to new threads, resumed threads and every turn", async () => {
+  const calls = [];
+  const client = new CodexClient({
+    launch: {},
+    cwd: "C:\\Project",
+    approvalPolicy: "never",
+    fullAccess: true,
+    logger: { info() {}, debug() {}, warn() {}, error() {} },
+  });
+  client.request = async (method, params) => {
+    calls.push({ method, params });
+    if (method === "thread/start") {
+      return { thread: { id: "thread-new" }, model: "gpt-5.6-sol", reasoningEffort: "high" };
+    }
+    if (method === "thread/resume") {
+      return { model: "gpt-5.6-sol", reasoningEffort: "high" };
+    }
+    if (method === "turn/start") return { turn: { id: "turn-1" } };
+    if (method === "thread/unsubscribe") return { status: "unsubscribed" };
+    return {};
+  };
+  client.child = { killed: false, exitCode: null };
+
+  await client.startThread({ cwd: "C:\\Project" });
+  await client.unsubscribeThread("thread-new");
+  await client.resumeThread("thread-old");
+  await client.startTurn("thread-old", "Do it");
+  await client.unsubscribeThread("thread-old");
+
+  assert.deepEqual(calls, [
+    {
+      method: "thread/start",
+      params: {
+        cwd: "C:\\Project",
+        serviceName: "codex_telegram_remote",
+        approvalPolicy: "never",
+        sandbox: "danger-full-access",
+      },
+    },
+    { method: "thread/unsubscribe", params: { threadId: "thread-new" } },
+    {
+      method: "thread/resume",
+      params: {
+        threadId: "thread-old",
+        approvalPolicy: "never",
+        sandbox: "danger-full-access",
+      },
+    },
+    {
+      method: "turn/start",
+      params: {
+        threadId: "thread-old",
+        input: [{ type: "text", text: "Do it" }],
+        approvalPolicy: "never",
+        sandboxPolicy: { type: "dangerFullAccess" },
+      },
+    },
+    { method: "thread/unsubscribe", params: { threadId: "thread-old" } },
+  ]);
+  assert.equal(client.loadedThreadCount, 0);
+});

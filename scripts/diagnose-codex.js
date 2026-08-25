@@ -1,7 +1,7 @@
 const path = require("node:path");
 const { discoverCodexBinary } = require("../src/codex-binary");
 const { CodexClient } = require("../src/codex-client");
-const { loadEnvFile } = require("../src/env");
+const { loadEnvFile, parseApprovalPolicy, parseBoolean } = require("../src/env");
 const { createLogger } = require("../src/logger");
 const { threadTitle } = require("../src/format");
 
@@ -15,7 +15,13 @@ const launch = discoverCodexBinary({
   explicitPath: process.env.CODEX_BINARY || null,
   logger,
 });
-const client = new CodexClient({ launch, cwd: defaultCwd, logger });
+const client = new CodexClient({
+  launch,
+  cwd: defaultCwd,
+  approvalPolicy: parseApprovalPolicy(process.env.CODEX_APPROVAL_POLICY),
+  fullAccess: parseBoolean(process.env.CODEX_FULL_ACCESS, false),
+  logger,
+});
 
 (async () => {
   try {

@@ -123,9 +123,10 @@ LOG_LEVEL=info
 Если `CODEX_DEFAULT_CWD` оставить пустым, новые чаты будут создаваться в
 `Documents\Codex` текущего пользователя. Если `CODEX_BINARY` пуст, бот
 автоматически найдёт актуальный `codex.exe` из Codex Desktop.
-`CODEX_APPROVAL_POLICY=never` отключает запросы `/approve` от Codex: действия,
-которым не хватает разрешений, будут возвращаться агенту как ошибка. Для более
-строгого ручного контроля можно указать `on-request` или `untrusted`.
+`CODEX_FULL_ACCESS=true` включает `never + danger-full-access` для процесса,
+старых и новых чатов и каждого хода, запущенного через Telegram. При значении
+`false` действует `CODEX_APPROVAL_POLICY`, где доступны `never`, `on-request`
+и `untrusted`.
 `TELEGRAM_MAX_FILE_SIZE_MB` задаёт максимальный размер загружаемого документа в
 мегабайтах. Значения `0` и `-1` отключают ограничение со стороны бота. При этом
 могут сохраняться собственные технические ограничения Telegram Bot API.

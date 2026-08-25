@@ -41,11 +41,14 @@ const HELP_TEXT = [
   "/use 2 — выбрать чат из последнего списка",
   "/new Название — создать новый чат",
   "/model — модель и усилие рассуждений",
+  "/access — режим доступа Telegram → Codex",
   "/status — состояние текущей задачи",
   "/stop — остановить текущую задачу",
   "/steer текст — уточнить выполняемую задачу",
   "/approve — разрешить ожидающее действие",
   "/deny — отклонить ожидающее действие",
+  "/answer ответ — ответить на вопрос Codex; несколько ответов через |",
+  "/unlock — освободить выбранный чат для приложения",
   "/id — показать ваш Telegram user ID",
   "",
   "Обычный текст отправляется в выбранный чат Codex.",
@@ -541,10 +544,13 @@ class CodexTelegramBot {
       { command: "use", description: "Сменить текущий чат" },
       { command: "new", description: "Создать новый чат" },
       { command: "model", description: "Модель и усилие рассуждений" },
+      { command: "access", description: "Режим доступа к Codex" },
       { command: "status", description: "Статус задачи" },
       { command: "stop", description: "Остановить задачу" },
       { command: "approve", description: "Разрешить действие" },
       { command: "deny", description: "Отклонить действие" },
+      { command: "answer", description: "Ответить на вопрос Codex" },
+      { command: "unlock", description: "Освободить выбранный чат" },
       { command: "help", description: "Справка" },
       { command: "release", description: "Release notes" },
       { command: "releases", description: "Release history" },
@@ -721,7 +727,12 @@ class CodexTelegramBot {
               "Если чат занят в Codex Desktop, дождись завершения задачи и повтори команду.",
             ].join("\n"),
           );
+        } finally {
+          await this.#releaseThreadIfIdle(this.state.currentThreadId);
         }
+        break;
+      case "/access":
+        await this.#showAccess(chatId);
         break;
       case "/status":
         await this.#showStatus(chatId);
@@ -737,6 +748,12 @@ class CodexTelegramBot {
         break;
       case "/deny":
         await this.#resolveApproval(chatId, false);
+        break;
+      case "/answer":
+        await this.#answerRequest(chatId, argument);
+        break;
+      case "/unlock":
+        await this.#unlockThread(chatId);
         break;
       case "/release":
         await this.#showRelease(chatId, argument);
@@ -990,6 +1007,7 @@ class CodexTelegramBot {
     } finally {
       this.desktopSyncSuspended = false;
     }
+    await this.#releaseThreadIfIdle(thread.id);
     await this.telegram.sendMessage(chatId, `✅ Создан и выбран новый чат:\n${threadTitle(thread)}`);
   }
 
@@ -1373,15 +1391,32 @@ class CodexTelegramBot {
     const threadId = this.state.currentThreadId;
     const active = threadId ? this.activeByThread.get(threadId) : null;
     const approvals = [...this.pendingApprovals.values()].filter(
-      (item) => !threadId || item.params.threadId === threadId,
+      (item) => !threadId || (item.params.threadId || item.params.conversationId) === threadId,
     );
     const lines = [
       `Codex app-server: ${this.codex.isRunning ? "работает" : "остановлен"}`,
       `Текущий чат: ${this.state.currentThreadName || "не выбран"}`,
       `Задача: ${active ? "выполняется" : "нет активной"}`,
-      `Ожидает подтверждения: ${approvals.length}`,
+      `Ожидает взаимодействия: ${approvals.length}`,
+      `Полный доступ: ${this.config.codexFullAccess ? "включён" : "выключен"}`,
+      `Подтверждения: ${this.config.codexFullAccess ? "never" : this.config.codexApprovalPolicy}`,
+      `Загружено ботом чатов: ${this.codex.loadedThreadCount ?? "неизвестно"}`,
     ];
     await this.telegram.sendMessage(chatId, lines.join("\n"));
+  }
+
+  async #showAccess(chatId) {
+    const fullAccess = Boolean(this.config.codexFullAccess);
+    await this.telegram.sendMessage(
+      chatId,
+      [
+        `Режим: ${fullAccess ? "ПОЛНЫЙ ДОСТУП" : "ограниченный"}`,
+        `Подтверждения Codex: ${fullAccess ? "never" : this.config.codexApprovalPolicy}`,
+        `Песочница: ${fullAccess ? "danger-full-access" : "по настройкам Codex"}`,
+        "Область: каждый новый ход через Telegram, во всех старых и новых чатах.",
+        "Computer Use и плагины наследуются от Codex; отдельные системные ограничения Windows и приложений сохраняются.",
+      ].join("\n"),
+    );
   }
 
   async #queuePrompt(threadId, chatId, text, options = {}) {
@@ -1433,18 +1468,37 @@ class CodexTelegramBot {
       return false;
     }
 
+    const [current, recentTurns] = await Promise.all([
+      this.codex.readThread(threadId, false),
+      this.codex.listTurns(threadId, { limit: 20, itemsView: "summary" }).catch((error) => {
+        if (isUnmaterializedThreadError(error)) return { data: [] };
+        throw error;
+      }),
+    ]);
+    if (isThreadBusy(current.thread) || hasActiveTurn(recentTurns.data)) {
+      if (options.queueWhenBusy) {
+        await this.#notifyQueuedBusyOnce(
+          threadId,
+          chatId,
+          text,
+          "⏳ Этот чат сейчас занят в приложении Codex. Задача остаётся в очереди.",
+        );
+        return this.#queuePrompt(threadId, chatId, text, { silent: true });
+      }
+      this.#scheduleWriterRelease("busy-thread");
+      await this.telegram.sendMessage(
+        chatId,
+        [
+          "⏳ Этот чат сейчас занят в приложении Codex.",
+          "Дождитесь завершения текущего ответа и отправьте сообщение ещё раз.",
+        ].join("\n"),
+      );
+      return false;
+    }
+
     this.#cancelWriterRelease();
-    let current;
-    let recentTurns;
     try {
       await this.codex.resumeThread(threadId);
-      [current, recentTurns] = await Promise.all([
-        this.codex.readThread(threadId, false),
-        this.codex.listTurns(threadId, { limit: 20, itemsView: "summary" }).catch((error) => {
-          if (isUnmaterializedThreadError(error)) return { data: [] };
-          throw error;
-        }),
-      ]);
     } catch (error) {
       if (isActiveWriterError(error)) {
         if (options.queueWhenBusy) {
@@ -1468,26 +1522,6 @@ class CodexTelegramBot {
       }
       this.#scheduleWriterRelease("resume-error");
       throw error;
-    }
-    if (isThreadBusy(current.thread) || hasActiveTurn(recentTurns.data)) {
-      if (options.queueWhenBusy) {
-        await this.#notifyQueuedBusyOnce(
-          threadId,
-          chatId,
-          text,
-          "⏳ Этот чат сейчас занят в приложении Codex. Задача остаётся в очереди.",
-        );
-        return this.#queuePrompt(threadId, chatId, text, { silent: true });
-      }
-      this.#scheduleWriterRelease("busy-thread");
-      await this.telegram.sendMessage(
-        chatId,
-        [
-          "⏳ Этот чат сейчас занят в приложении Codex.",
-          "Дождитесь завершения текущего ответа и отправьте сообщение ещё раз.",
-        ].join("\n"),
-      );
-      return false;
     }
 
     const progress = await this.telegram.sendMessage(chatId, "⏳ Codex начинает работу…");
@@ -1549,14 +1583,34 @@ class CodexTelegramBot {
 
   async #resolveApproval(chatId, accepted) {
     const approval = [...this.pendingApprovals.values()].find(
-      (item) => !this.state.currentThreadId || item.params.threadId === this.state.currentThreadId,
+      (item) =>
+        !this.state.currentThreadId ||
+        (item.params.threadId || item.params.conversationId) === this.state.currentThreadId,
     );
     if (!approval) {
       await this.telegram.sendMessage(chatId, "Нет действий, ожидающих подтверждения.");
       return;
     }
 
-    if (approval.kind === "permissions") {
+    if (approval.kind === "userInput" || approval.kind === "mcpForm") {
+      await this.telegram.sendMessage(
+        chatId,
+        approval.kind === "userInput"
+          ? "Этот запрос ожидает текст. Используй /answer ответ."
+          : "Эта форма ожидает JSON. Используй /answer {\"поле\":\"значение\"}.",
+      );
+      return;
+    }
+
+    if (approval.kind === "legacyCommand" || approval.kind === "legacyPatch") {
+      this.codex.respond(approval.id, { decision: accepted ? "approved" : "denied" });
+    } else if (approval.kind === "mcpUrl") {
+      this.codex.respond(approval.id, {
+        action: accepted ? "accept" : "decline",
+        content: null,
+        _meta: null,
+      });
+    } else if (approval.kind === "permissions") {
       if (accepted && !approval.params.permissions) {
         await this.telegram.sendMessage(
           chatId,
@@ -1576,9 +1630,96 @@ class CodexTelegramBot {
     await this.telegram.sendMessage(chatId, accepted ? "✅ Действие разрешено." : "🚫 Действие отклонено.");
   }
 
+  async #answerRequest(chatId, argument) {
+    const pending = [...this.pendingApprovals.values()].find(
+      (item) =>
+        (item.kind === "userInput" || item.kind === "mcpForm") &&
+        (!this.state.currentThreadId ||
+          (item.params.threadId || item.params.conversationId) === this.state.currentThreadId),
+    );
+    if (!pending) {
+      await this.telegram.sendMessage(chatId, "Нет вопроса Codex, ожидающего ответа.");
+      return;
+    }
+    if (!argument) {
+      await this.telegram.sendMessage(
+        chatId,
+        pending.kind === "mcpForm"
+          ? "Формат: /answer {\"поле\":\"значение\"}"
+          : "Формат: /answer ответ; для нескольких вопросов разделяй ответы символом |",
+      );
+      return;
+    }
+
+    if (pending.kind === "mcpForm") {
+      let content;
+      try {
+        content = JSON.parse(argument);
+      } catch {
+        await this.telegram.sendMessage(chatId, "Не удалось разобрать JSON формы.");
+        return;
+      }
+      if (!content || Array.isArray(content) || typeof content !== "object") {
+        await this.telegram.sendMessage(chatId, "Ответ формы должен быть JSON-объектом.");
+        return;
+      }
+      this.codex.respond(pending.id, { action: "accept", content, _meta: null });
+    } else {
+      const questions = Array.isArray(pending.params.questions) ? pending.params.questions : [];
+      const values = questions.length === 1
+        ? [argument.trim()]
+        : argument.split("|").map((value) => value.trim());
+      if (!questions.length || values.length !== questions.length || values.some((value) => !value)) {
+        await this.telegram.sendMessage(
+          chatId,
+          `Ожидается ответов: ${questions.length}. Разделяй их символом | в указанном порядке.`,
+        );
+        return;
+      }
+      const answers = {};
+      questions.forEach((question, index) => {
+        answers[question.id] = { answers: [values[index]] };
+      });
+      this.codex.respond(pending.id, { answers });
+    }
+    this.pendingApprovals.delete(pending.id);
+    await this.telegram.sendMessage(chatId, "✅ Ответ передан Codex.");
+  }
+
+  async #unlockThread(chatId) {
+    const threadId = this.state.currentThreadId;
+    if (!threadId) {
+      await this.telegram.sendMessage(chatId, "Текущий чат не выбран.");
+      return;
+    }
+    if (this.activeByThread.has(threadId)) {
+      await this.telegram.sendMessage(chatId, "Чат занят задачей Telegram. Сначала используй /stop.");
+      return;
+    }
+    const released = await this.#releaseThreadIfIdle(threadId);
+    await this.telegram.sendMessage(
+      chatId,
+      released
+        ? "🔓 Выбранный чат освобождён для приложения Codex."
+        : "⚠️ Не удалось освободить чат; проверь /status и повтори команду.",
+    );
+  }
+
+  async #releaseThreadIfIdle(threadId) {
+    if (!threadId || this.activeByThread.has(threadId)) return false;
+    if (typeof this.codex.unsubscribeThread !== "function") return false;
+    try {
+      await this.codex.unsubscribeThread(threadId);
+      return true;
+    } catch (error) {
+      this.logger.warn("Не удалось освободить чат Codex", { threadId, message: error.message });
+      return false;
+    }
+  }
+
   #contextFor(params) {
     const turnId = params?.turnId || params?.turn?.id;
-    const threadId = params?.threadId || params?.turn?.threadId;
+    const threadId = params?.threadId || params?.conversationId || params?.turn?.threadId;
     return this.activeByTurn.get(turnId) || this.activeByThread.get(threadId);
   }
 
@@ -1668,6 +1809,8 @@ class CodexTelegramBot {
         turnId,
         message: error.message,
       });
+    } finally {
+      await this.#releaseThreadIfIdle(context.threadId);
     }
 
     await this.#drainPromptQueue(context.threadId);
@@ -1680,6 +1823,14 @@ class CodexTelegramBot {
     if (method === "item/commandExecution/requestApproval") kind = "command";
     if (method === "item/fileChange/requestApproval") kind = "file";
     if (method === "item/permissions/requestApproval") kind = "permissions";
+    if (method === "item/tool/requestUserInput" || method === "tool/requestUserInput") {
+      kind = "userInput";
+    }
+    if (method === "execCommandApproval") kind = "legacyCommand";
+    if (method === "applyPatchApproval") kind = "legacyPatch";
+    if (method === "mcpServer/elicitation/request") {
+      kind = params.mode === "url" ? "mcpUrl" : "mcpForm";
+    }
 
     const chatId = this.#contextFor(params)?.chatId || this.state.lastChatId;
     if (!kind) {
@@ -1697,6 +1848,55 @@ class CodexTelegramBot {
     this.pendingApprovals.set(id, { id, method, params, kind });
     if (!chatId) return;
 
+    if (kind === "userInput") {
+      const questions = Array.isArray(params.questions) ? params.questions : [];
+      const lines = questions.flatMap((question, index) => {
+        const options = Array.isArray(question.options)
+          ? question.options.map((option) => `  • ${option.label}${option.description ? ` — ${option.description}` : ""}`)
+          : [];
+        return [`${index + 1}. ${question.question}`, ...options];
+      });
+      await this.telegram.sendMessage(
+        chatId,
+        [
+          "❓ Codex просит ответ:",
+          ...lines,
+          "",
+          questions.length > 1
+            ? "Ответь: /answer первый ответ | второй ответ"
+            : "Ответь: /answer текст",
+        ].join("\n"),
+      );
+      return;
+    }
+
+    if (kind === "mcpUrl") {
+      await this.telegram.sendMessage(
+        chatId,
+        [
+          `🔗 ${params.message || "Сервис просит открыть ссылку."}`,
+          String(params.url || ""),
+          "",
+          "После выполнения ответь /approve или /deny.",
+        ].join("\n"),
+      );
+      return;
+    }
+
+    if (kind === "mcpForm") {
+      const fields = Object.keys(params.requestedSchema?.properties || {});
+      await this.telegram.sendMessage(
+        chatId,
+        [
+          `🧾 ${params.message || "Сервис просит заполнить форму."}`,
+          `Поля: ${fields.join(", ") || "см. описание запроса"}`,
+          "",
+          "Ответь JSON-объектом: /answer {\"поле\":\"значение\"}",
+        ].join("\n"),
+      );
+      return;
+    }
+
     const details = [];
     if (params.reason) details.push(`Причина: ${params.reason}`);
     if (params.command) {
@@ -1711,7 +1911,9 @@ class CodexTelegramBot {
     await this.telegram.sendMessage(
       chatId,
       [
-        kind === "file" ? "⚠️ Codex просит разрешить изменение файлов." : "⚠️ Codex просит разрешение.",
+        kind === "file" || kind === "legacyPatch"
+          ? "⚠️ Codex просит разрешить изменение файлов."
+          : "⚠️ Codex просит разрешение.",
         ...details,
         "",
         "Ответь /approve или /deny.",

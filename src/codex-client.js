@@ -65,6 +65,8 @@ class CodexClient extends EventEmitter {
     this.logger.info("Запуск Codex app-server", {
       version: this.launch.version.raw,
       cwd: this.cwd,
+      approvalPolicy: this.fullAccess ? "never" : this.approvalPolicy,
+      fullAccess: this.fullAccess,
     });
     this.loadedThreads.clear();
     this.child = spawn(
@@ -237,7 +239,14 @@ class CodexClient extends EventEmitter {
     if (this.loadedThreads.has(threadId)) {
       return this.threadModelSettings.get(threadId) || null;
     }
-    const result = await this.request("thread/resume", { threadId }, 120000);
+    const accessOverrides = this.fullAccess
+      ? { approvalPolicy: "never", sandbox: "danger-full-access" }
+      : {};
+    const result = await this.request(
+      "thread/resume",
+      { threadId, ...accessOverrides },
+      120000,
+    );
     this.loadedThreads.add(threadId);
     const settings = {
       model: result.model,
@@ -248,9 +257,16 @@ class CodexClient extends EventEmitter {
   }
 
   async startThread({ cwd, name = null }) {
+    const accessOverrides = this.fullAccess
+      ? { approvalPolicy: "never", sandbox: "danger-full-access" }
+      : {};
     const result = await this.request(
       "thread/start",
-      { cwd, serviceName: "codex_telegram_remote" },
+      {
+        cwd,
+        serviceName: "codex_telegram_remote",
+        ...accessOverrides,
+      },
       120000,
     );
     const threadId = result.thread.id;
@@ -304,6 +320,24 @@ class CodexClient extends EventEmitter {
       { threadId, input: [{ type: "text", text }], ...accessOverrides },
       120000,
     );
+  }
+
+  async unsubscribeThread(threadId) {
+    if (!this.isRunning) {
+      this.loadedThreads.delete(threadId);
+      this.threadModelSettings.delete(threadId);
+      return { status: "notLoaded" };
+    }
+    try {
+      return await this.request("thread/unsubscribe", { threadId });
+    } finally {
+      this.loadedThreads.delete(threadId);
+      this.threadModelSettings.delete(threadId);
+    }
+  }
+
+  get loadedThreadCount() {
+    return this.loadedThreads.size;
   }
 
   steerTurn(threadId, turnId, text) {
