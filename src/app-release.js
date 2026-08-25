@@ -123,6 +123,17 @@ const RELEASE_HISTORY = [
       "Codex replies and generated documents are sent back to the same Telegram topic.",
     ],
   },
+  {
+    id: "2026-08-25-topic-auth-hardening",
+    version: "0.1.12",
+    sequence: 12,
+    title: "Telegram topic authorization hardening",
+    notes: [
+      "Bot and Telegram service messages from topic creation are ignored before authorization checks.",
+      "Anonymous admin messages do not run commands and do not fill topics with access-denied replies.",
+      "Unauthorized /sync_topics commands are covered by tests so they cannot create topics.",
+    ],
+  },
 ];
 
 const CURRENT_RELEASE = RELEASE_HISTORY.at(-1);

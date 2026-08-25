@@ -747,13 +747,53 @@ class CodexTelegramBot {
     return Number(userId) === this.config.allowedUserId;
   }
 
+  #isServiceMessage(message) {
+    return Boolean(
+      message.forum_topic_created ||
+      message.forum_topic_edited ||
+      message.forum_topic_closed ||
+      message.forum_topic_reopened ||
+      message.general_forum_topic_hidden ||
+      message.general_forum_topic_unhidden ||
+      message.migrate_to_chat_id ||
+      message.migrate_from_chat_id ||
+      message.new_chat_members ||
+      message.left_chat_member ||
+      message.pinned_message,
+    );
+  }
+
+  #isBotMessage(message) {
+    const userId = Number(message.from?.id);
+    return Boolean(
+      message.from?.is_bot ||
+      (this.telegram.botUserId && userId === Number(this.telegram.botUserId)) ||
+      (this.telegram.me?.id && userId === Number(this.telegram.me.id)),
+    );
+  }
+
+  #shouldNotifyUnauthorized(message) {
+    return !this.#isBotMessage(message) && !message.sender_chat && !this.#isServiceMessage(message);
+  }
+
   async #handleMessage(message) {
     const userId = message.from?.id;
     const chatId = message.chat?.id;
     const target = this.#targetFromMessage(message);
+    if (message.migrate_to_chat_id && this.state.lastChatId === chatId) {
+      this.state = this.stateStore.save({ lastChatId: message.migrate_to_chat_id });
+    }
+    if (this.#isBotMessage(message) || this.#isServiceMessage(message)) return;
     if (!this.#isAuthorized(userId)) {
-      this.logger.warn("Отклонено сообщение от постороннего пользователя", { userId, chatId });
-      await this.telegram.sendMessage(target, `Доступ запрещён. Ваш Telegram user ID: ${userId}`);
+      this.logger.warn("Отклонено сообщение от постороннего пользователя", {
+        userId,
+        chatId,
+        senderChatId: message.sender_chat?.id,
+        username: message.from?.username,
+      });
+      if (this.#shouldNotifyUnauthorized(message)) {
+        await this.telegram.sendMessage(target, `Доступ запрещён. Ваш Telegram user ID: ${userId}`);
+      }
       return;
     }
 

@@ -370,6 +370,113 @@ test("команда /model добавлена в меню быстрых ком
   assert.equal(commands.some((item) => item.command === "unlock"), true);
 });
 
+test("бот игнорирует собственные service-сообщения при создании Telegram topic", async () => {
+  const sent = [];
+  const telegram = new EventEmitter();
+  telegram.botUserId = 8861661731;
+  telegram.sendMessage = async (chatId, text) => {
+    sent.push({ chatId, text });
+    return { message_id: sent.length };
+  };
+
+  const codex = new EventEmitter();
+  const bot = new CodexTelegramBot({
+    telegram,
+    codex,
+    stateStore: createStateStore(),
+    config: { allowedUserId: 7, desktopSyncPollMs: 1000 },
+    logger: createLogger(),
+  });
+
+  await bot.handleUpdate({
+    message: {
+      from: { id: 8861661731, is_bot: true, username: "ocume_bot" },
+      chat: { id: -100 },
+      message_thread_id: 8,
+      forum_topic_created: { name: "Bridge8 #2" },
+    },
+  });
+
+  assert.deepEqual(sent, []);
+});
+
+test("чужой пользователь не может запустить /sync_topics", async () => {
+  const sent = [];
+  let createTopicCalls = 0;
+  const telegram = new EventEmitter();
+  telegram.sendMessage = async (chatId, text) => {
+    sent.push({ chatId, text });
+    return { message_id: sent.length };
+  };
+  telegram.createForumTopic = async () => {
+    createTopicCalls += 1;
+    return { message_thread_id: 10 };
+  };
+
+  const codex = new EventEmitter();
+  codex.listThreads = async () => ({
+    data: [{ id: "thread-a", name: "Alpha", status: { type: "idle" } }],
+  });
+
+  const bot = new CodexTelegramBot({
+    telegram,
+    codex,
+    stateStore: createStateStore(),
+    config: { allowedUserId: 7, desktopSyncPollMs: 1000 },
+    logger: createLogger(),
+  });
+
+  await bot.handleUpdate({
+    message: {
+      from: { id: 999, is_bot: false },
+      chat: { id: -100 },
+      text: "/sync_topics@ocume_bot",
+    },
+  });
+
+  assert.equal(createTopicCalls, 0);
+  assert.match(sent.at(-1).text, /Доступ запрещён/);
+});
+
+test("анонимный админ не запускает команды и не засоряет темы отказами", async () => {
+  const sent = [];
+  let createTopicCalls = 0;
+  const telegram = new EventEmitter();
+  telegram.sendMessage = async (chatId, text) => {
+    sent.push({ chatId, text });
+    return { message_id: sent.length };
+  };
+  telegram.createForumTopic = async () => {
+    createTopicCalls += 1;
+    return { message_thread_id: 10 };
+  };
+
+  const codex = new EventEmitter();
+  codex.listThreads = async () => ({
+    data: [{ id: "thread-a", name: "Alpha", status: { type: "idle" } }],
+  });
+
+  const bot = new CodexTelegramBot({
+    telegram,
+    codex,
+    stateStore: createStateStore(),
+    config: { allowedUserId: 7, desktopSyncPollMs: 1000 },
+    logger: createLogger(),
+  });
+
+  await bot.handleUpdate({
+    message: {
+      from: { id: 1087968824, is_bot: false, username: "GroupAnonymousBot" },
+      sender_chat: { id: -100, title: "ChatGPT Group Bot", type: "supergroup" },
+      chat: { id: -100 },
+      text: "/sync_topics@ocume_bot",
+    },
+  });
+
+  assert.equal(createTopicCalls, 0);
+  assert.deepEqual(sent, []);
+});
+
 test("вопрос Codex можно полностью обработать через /answer", async () => {
   const sent = [];
   const responses = [];

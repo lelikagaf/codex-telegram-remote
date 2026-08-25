@@ -52,8 +52,11 @@ class TelegramClient extends EventEmitter {
     }
   }
 
-  getMe() {
-    return this.call("getMe");
+  async getMe() {
+    const me = await this.call("getMe");
+    this.me = me;
+    this.botUserId = me?.id;
+    return me;
   }
 
   getFile(fileId) {
