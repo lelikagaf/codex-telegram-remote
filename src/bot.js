@@ -1719,7 +1719,7 @@ class CodexTelegramBot {
         `Режим: ${fullAccess ? "ПОЛНЫЙ ДОСТУП" : "ограниченный"}`,
         `Подтверждения Codex: ${fullAccess ? "never" : this.config.codexApprovalPolicy}`,
         `Песочница: ${fullAccess ? "danger-full-access" : "по настройкам Codex"}`,
-        `Другие чаты Codex: ${appToolsEnabled ? "доступны для поиска и чтения" : "недоступны"}`,
+        `Другие чаты Codex: ${appToolsEnabled ? "доступны для поиска, чтения и отправки сообщений" : "недоступны"}`,
         `Конфликт writer с Desktop: ${this.config.activeWriterMode || "queue"}`,
         "Область: каждый новый ход через Telegram, во всех старых и новых чатах.",
         "Computer Use и плагины наследуются от Codex; отдельные системные ограничения Windows и приложений сохраняются.",

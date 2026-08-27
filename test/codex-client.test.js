@@ -223,6 +223,7 @@ test("chat tools bridge can be switched on for old and new chats", async () => {
   assert.match(server.args[0], /codex-chat-mcp\.js$/);
   assert.equal(server.env.CODEX_CHAT_BRIDGE_COMMAND, launch.command);
   assert.equal(server.env.CODEX_CHAT_BRIDGE_ARGS, '["wrapper"]');
+  assert.equal(server.env.CODEX_CHAT_BRIDGE_FULL_ACCESS, "false");
   assert.deepEqual(buildChatToolsOverrides({ enabled: false, launch, cwd: "C:\\Project" }), {});
 
   const calls = [];
@@ -245,6 +246,28 @@ test("chat tools bridge can be switched on for old and new chats", async () => {
   for (const call of calls) {
     assert.ok(call.params.config.mcp_servers[CHAT_TOOLS_SERVER_NAME]);
   }
+});
+
+test("cross-chat context tells every Telegram turn its current thread ID", async () => {
+  const client = new CodexClient({
+    launch: {},
+    cwd: "C:\\Project",
+    appToolsEnabled: true,
+    logger: { info() {}, debug() {}, warn() {}, error() {} },
+  });
+  let call = null;
+  client.request = async (method, params) => {
+    call = { method, params };
+    return { turn: { id: "turn-1" } };
+  };
+
+  await client.startTurn("thread-current", "Отправь ID");
+  assert.equal(call.method, "turn/start");
+  assert.match(
+    call.params.additionalContext["codex-telegram-remote"].value,
+    /Current Codex thread ID: thread-current/,
+  );
+  assert.match(call.params.additionalContext["codex-telegram-remote"].value, /send messages/);
 });
 
 test("persisted turn pagination uses a local cursor without acquiring a writer", async () => {

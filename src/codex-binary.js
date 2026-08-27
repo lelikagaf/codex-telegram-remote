@@ -38,7 +38,24 @@ function inspectCandidate(candidate) {
   if (result.error || result.status !== 0) return null;
   const version = parseVersion(`${result.stdout || ""} ${result.stderr || ""}`);
   if (!version) return null;
-  return { ...candidate, version };
+  let modifiedAtMs = 0;
+  try {
+    modifiedAtMs = fs.statSync(candidate.command).mtimeMs;
+  } catch {}
+  const isDesktopBinary = path.basename(candidate.command).toLowerCase() === "codex.exe";
+  const codeModeHostAvailable = isDesktopBinary
+    ? fs.existsSync(path.join(path.dirname(candidate.command), "codex-code-mode-host.exe"))
+    : null;
+  return { ...candidate, version, modifiedAtMs, codeModeHostAvailable };
+}
+
+function compareCandidates(left, right) {
+  const versionOrder = compareVersions(left.version, right.version);
+  if (versionOrder) return versionOrder;
+  const leftHost = left.codeModeHostAvailable === true ? 1 : 0;
+  const rightHost = right.codeModeHostAvailable === true ? 1 : 0;
+  if (leftHost !== rightHost) return leftHost - rightHost;
+  return (left.modifiedAtMs || 0) - (right.modifiedAtMs || 0);
 }
 
 function discoverCodexBinary({ explicitPath = null, logger = console } = {}) {
@@ -86,14 +103,15 @@ function discoverCodexBinary({ explicitPath = null, logger = console } = {}) {
     );
   }
 
-  inspected.sort((a, b) => compareVersions(b.version, a.version));
+  inspected.sort((a, b) => compareCandidates(b, a));
   const selected = inspected[0];
   logger.info("Выбран бинарник Codex", {
     source: selected.source,
     version: selected.version.raw,
     path: selected.command,
+    codeModeHostAvailable: selected.codeModeHostAvailable,
   });
   return selected;
 }
 
-module.exports = { compareVersions, discoverCodexBinary, parseVersion };
+module.exports = { compareCandidates, compareVersions, discoverCodexBinary, parseVersion };

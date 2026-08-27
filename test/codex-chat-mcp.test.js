@@ -4,10 +4,15 @@ const {
   TOOLS,
   callTool,
   simplifyItem,
+  sendMessageToChat,
 } = require("../scripts/codex-chat-mcp");
 
-test("MCP bridge advertises read-only Codex chat tools", () => {
-  assert.deepEqual(TOOLS.map((tool) => tool.name), ["codex_list_chats", "codex_read_chat"]);
+test("MCP bridge advertises cross-chat read and send tools", () => {
+  assert.deepEqual(TOOLS.map((tool) => tool.name), [
+    "codex_list_chats",
+    "codex_read_chat",
+    "codex_send_message_to_chat",
+  ]);
   assert.match(TOOLS[0].description, /do not claim/i);
 });
 
@@ -68,4 +73,22 @@ test("technical chat items are bounded when explicitly requested", () => {
   }, true);
   assert.match(item.command, /truncated/);
   assert.match(item.output, /truncated/);
+});
+
+test("cross-chat send uses the persistent destination queue", async () => {
+  const calls = [];
+  const client = {
+    async request(method, params, timeoutMs) {
+      calls.push({ method, params, timeoutMs });
+      return { queuedSubmission: { id: "queued-1" } };
+    },
+  };
+
+  const result = await sendMessageToChat(client, "thread-2", "Сообщение");
+  assert.equal(result.queuedSubmissionId, "queued-1");
+  assert.equal(result.status, "queued");
+  assert.equal(calls[0].method, "thread/queue/add");
+  assert.equal(calls[0].params.threadId, "thread-2");
+  assert.equal(calls[0].params.input[0].text, "Сообщение");
+  assert.match(calls[0].params.clientUserMessageId, /^[0-9a-f-]{36}$/i);
 });

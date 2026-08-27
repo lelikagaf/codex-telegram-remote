@@ -168,6 +168,18 @@ const RELEASE_HISTORY = [
       "/access and /status now report whether cross-chat tools are enabled.",
     ],
   },
+  {
+    id: "2026-08-27-cross-chat-send-and-runtime-recovery",
+    version: "0.1.16",
+    sequence: 16,
+    title: "Complete cross-chat actions",
+    notes: [
+      "Telegram tasks now receive their exact current Codex thread ID in application context.",
+      "Added a tool that queues an explicitly requested message in another Codex chat, including when that chat is busy.",
+      "Codex binary discovery now prefers a complete Desktop runtime containing codex-code-mode-host.exe.",
+      "This restores shell, SSH, skills, and other code-mode tools after an incomplete Codex cleanup leaves duplicate binaries.",
+    ],
+  },
 ];
 
 const CURRENT_RELEASE = RELEASE_HISTORY.at(-1);

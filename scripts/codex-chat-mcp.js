@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 "use strict";
 
+const crypto = require("node:crypto");
 const readline = require("node:readline");
 const { CodexClient } = require("../src/codex-client");
 
@@ -40,6 +41,20 @@ const TOOLS = [
         },
       },
       required: ["threadId"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "codex_send_message_to_chat",
+    description:
+      "Queue a user-requested message in another Codex chat. Use this when the user explicitly asks to write, send, continue, or relay something in a different Codex chat. The destination receives it even when that chat is currently busy. The current chat ID is provided in application context.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        threadId: { type: "string", minLength: 1, description: "Destination Codex thread ID." },
+        message: { type: "string", minLength: 1, description: "Exact message to send." },
+      },
+      required: ["threadId", "message"],
       additionalProperties: false,
     },
   },
@@ -139,10 +154,23 @@ function createBridgeClient() {
     launch: { command, argsPrefix, version: { raw: "chat-bridge" } },
     cwd: process.env.CODEX_CHAT_BRIDGE_CWD || process.cwd(),
     approvalPolicy: "never",
-    fullAccess: false,
+    fullAccess: /^(1|true|yes|on)$/i.test(process.env.CODEX_CHAT_BRIDGE_FULL_ACCESS || ""),
     appToolsEnabled: false,
     logger: { debug() {}, info() {}, warn() {}, error() {} },
   });
+}
+
+async function sendMessageToChat(client, threadId, message) {
+  const result = await client.request("thread/queue/add", {
+    threadId,
+    clientUserMessageId: crypto.randomUUID(),
+    input: [{ type: "text", text: message }],
+  }, 120_000);
+  return {
+    threadId,
+    queuedSubmissionId: result.queuedSubmission?.id || null,
+    status: "queued",
+  };
 }
 
 async function callTool(client, name, args = {}) {
@@ -176,6 +204,13 @@ async function callTool(client, name, args = {}) {
       ),
       nextCursor: turnsResult.nextCursor || null,
     };
+  }
+  if (name === "codex_send_message_to_chat") {
+    const threadId = String(args.threadId || "").trim();
+    const message = String(args.message || "").trim();
+    if (!threadId) throw new Error("threadId is required");
+    if (!message) throw new Error("message is required");
+    return sendMessageToChat(client, threadId, message);
   }
   throw new Error(`Unknown tool: ${name}`);
 }
@@ -264,4 +299,5 @@ module.exports = {
   simplifyItem,
   simplifyThread,
   simplifyTurn,
+  sendMessageToChat,
 };

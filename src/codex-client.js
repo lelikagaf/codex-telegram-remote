@@ -5,7 +5,7 @@ const readline = require("node:readline");
 
 const CHAT_TOOLS_SERVER_NAME = "codex_telegram_chats";
 
-function buildChatToolsOverrides({ enabled, launch, cwd }) {
+function buildChatToolsOverrides({ enabled, launch, cwd, fullAccess = false }) {
   if (!enabled) return {};
   const serverPath = path.resolve(__dirname, "..", "scripts", "codex-chat-mcp.js");
   return {
@@ -18,6 +18,7 @@ function buildChatToolsOverrides({ enabled, launch, cwd }) {
             CODEX_CHAT_BRIDGE_COMMAND: launch.command,
             CODEX_CHAT_BRIDGE_ARGS: JSON.stringify(launch.argsPrefix || []),
             CODEX_CHAT_BRIDGE_CWD: cwd,
+            CODEX_CHAT_BRIDGE_FULL_ACCESS: fullAccess ? "true" : "false",
           },
           startup_timeout_sec: 30,
           tool_timeout_sec: 120,
@@ -306,6 +307,7 @@ class CodexClient extends EventEmitter {
       enabled: this.appToolsEnabled,
       launch: this.launch,
       cwd: this.cwd,
+      fullAccess: this.fullAccess,
     });
     const result = await this.request(
       "thread/resume",
@@ -329,6 +331,7 @@ class CodexClient extends EventEmitter {
       enabled: this.appToolsEnabled,
       launch: this.launch,
       cwd: this.cwd,
+      fullAccess: this.fullAccess,
     });
     const result = await this.request(
       "thread/start",
@@ -361,6 +364,7 @@ class CodexClient extends EventEmitter {
       enabled: this.appToolsEnabled,
       launch: this.launch,
       cwd: this.cwd,
+      fullAccess: this.fullAccess,
     });
     const result = await this.request(
       "thread/fork",
@@ -417,9 +421,28 @@ class CodexClient extends EventEmitter {
           sandboxPolicy: { type: "dangerFullAccess" },
         }
       : {};
+    const appContext = this.appToolsEnabled
+      ? {
+          additionalContext: {
+            "codex-telegram-remote": {
+              kind: "application",
+              value: [
+                `Current Codex thread ID: ${threadId}`,
+                "The codex_telegram_chats tools can list, read, and send messages to other Codex chats.",
+                "When the user asks about another chat or asks to send something there, use those tools before claiming the action is unavailable.",
+              ].join("\n"),
+            },
+          },
+        }
+      : {};
     return this.request(
       "turn/start",
-      { threadId, input: [{ type: "text", text }], ...accessOverrides },
+      {
+        threadId,
+        input: [{ type: "text", text }],
+        ...accessOverrides,
+        ...appContext,
+      },
       120000,
     );
   }

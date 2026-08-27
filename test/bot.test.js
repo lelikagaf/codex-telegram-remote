@@ -1231,7 +1231,7 @@ test("/access reports switchable cross-chat access", async () => {
     message: { from: { id: 7 }, chat: { id: 100 }, text: "/access" },
   });
 
-  assert.match(sent.at(-1).text, /Другие чаты Codex: доступны для поиска и чтения/);
+  assert.match(sent.at(-1).text, /Другие чаты Codex: доступны для поиска, чтения и отправки сообщений/);
   assert.match(sent.at(-1).text, /CODEX_APP_TOOLS_ENABLED=false/);
 });
 
