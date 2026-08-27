@@ -20,6 +20,7 @@ class StateStore {
       telegramFinalDeliveredTurnIds: null,
       telegramTopicThreads: {},
       telegramThreadTopics: {},
+      unmaterializedThreadIds: [],
     };
   }
 

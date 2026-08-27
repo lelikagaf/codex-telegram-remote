@@ -51,6 +51,7 @@ function createStateStore(overrides = {}) {
       telegramFinalDeliveredTurnIds: [],
       telegramTopicThreads: {},
       telegramThreadTopics: {},
+      unmaterializedThreadIds: [],
       ...overrides,
     },
     save(patch) {
@@ -1025,6 +1026,114 @@ test("распознаётся ошибка ещё не материализов
     true,
   );
   assert.equal(isUnmaterializedThreadError(new Error("other failure")), false);
+});
+
+test("новый чат остаётся загруженным до первого Telegram-задания", async () => {
+  const sent = [];
+  const started = [];
+  let resumeCalls = 0;
+  const telegram = new EventEmitter();
+  telegram.sendMessage = async (target, text) => {
+    sent.push({ target, text });
+    return { message_id: sent.length };
+  };
+  telegram.editMessage = async () => {};
+
+  const codex = new EventEmitter();
+  codex.startThread = async () => ({
+    thread: { id: "thread-new", name: "Новый чат", status: { type: "idle" } },
+  });
+  codex.resumeThread = async () => {
+    resumeCalls += 1;
+    throw new Error("Новый чат нельзя возобновлять до первого сообщения");
+  };
+  codex.startTurn = async (threadId, text) => {
+    started.push({ threadId, text });
+    return { turn: { id: "turn-new" } };
+  };
+
+  const stateStore = createStateStore();
+  const bot = new CodexTelegramBot({
+    telegram,
+    codex,
+    stateStore,
+    config: {
+      allowedUserId: 7,
+      defaultCwd: "C:\\Project",
+      desktopSyncPollMs: 1000,
+      incomingMessageSettleMs: 1,
+    },
+    logger: createLogger(),
+  });
+
+  await bot.handleUpdate({
+    message: { from: { id: 7 }, chat: { id: 100 }, text: "/new Новый чат" },
+  });
+  await bot.handleUpdate({
+    message: { from: { id: 7 }, chat: { id: 100 }, text: "Выполни инструкцию" },
+  });
+  await waitFor(() => started.length === 1);
+
+  assert.deepEqual(started[0], { threadId: "thread-new", text: "Выполни инструкцию" });
+  assert.equal(resumeCalls, 0);
+  assert.deepEqual(stateStore.state.unmaterializedThreadIds, []);
+});
+
+test("осиротевший новый чат старой версии автоматически пересоздаётся", async () => {
+  const sent = [];
+  const started = [];
+  const telegram = new EventEmitter();
+  telegram.sendMessage = async (target, text) => {
+    sent.push({ target, text });
+    return { message_id: sent.length };
+  };
+  telegram.editMessage = async () => {};
+
+  const codex = new EventEmitter();
+  codex.readThread = async () => {
+    throw new Error("thread not loaded: thread-orphan");
+  };
+  codex.listTurns = async () => {
+    throw new Error("thread not loaded: thread-orphan");
+  };
+  codex.resumeThread = async () => {
+    throw new Error("thread/resume: no rollout found for thread id thread-orphan");
+  };
+  codex.startThread = async () => ({
+    thread: { id: "thread-recovered", name: null, status: { type: "idle" } },
+  });
+  codex.startTurn = async (threadId, text) => {
+    started.push({ threadId, text });
+    return { turn: { id: "turn-recovered" } };
+  };
+
+  const stateStore = createStateStore({
+    currentThreadId: "thread-orphan",
+    currentThreadName: "Без названия",
+    desktopSyncThreadId: null,
+  });
+  const bot = new CodexTelegramBot({
+    telegram,
+    codex,
+    stateStore,
+    config: {
+      allowedUserId: 7,
+      defaultCwd: "C:\\Project",
+      desktopSyncPollMs: 1000,
+      incomingMessageSettleMs: 1,
+    },
+    logger: createLogger(),
+  });
+
+  await bot.handleUpdate({
+    message: { from: { id: 7 }, chat: { id: 100 }, text: "Продолжай" },
+  });
+  await waitFor(() => started.length === 1);
+
+  assert.deepEqual(started[0], { threadId: "thread-recovered", text: "Продолжай" });
+  assert.equal(stateStore.state.currentThreadId, "thread-recovered");
+  assert.deepEqual(stateStore.state.unmaterializedThreadIds, []);
+  assert.ok(sent.some(({ text }) => text.includes("Новый чат восстановлен")));
 });
 
 test("Telegram-документ скачивается без лимита и передаётся Codex вместе с подписью", async () => {

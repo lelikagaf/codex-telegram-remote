@@ -134,6 +134,17 @@ const RELEASE_HISTORY = [
       "Unauthorized /sync_topics commands are covered by tests so they cannot create topics.",
     ],
   },
+  {
+    id: "2026-08-27-new-thread-recovery",
+    version: "0.1.13",
+    sequence: 13,
+    title: "Reliable new chats",
+    notes: [
+      "New Codex chats stay attached until their first Telegram task creates a persisted rollout.",
+      "A new chat left unmaterialized by a bot restart is recreated automatically before processing.",
+      "Legacy orphaned chats that report no rollout are recovered without manual chat selection.",
+    ],
+  },
 ];
 
 const CURRENT_RELEASE = RELEASE_HISTORY.at(-1);

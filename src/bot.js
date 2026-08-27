@@ -98,6 +98,14 @@ function isUnmaterializedThreadError(error) {
   );
 }
 
+function isMissingRolloutError(error) {
+  return /no rollout found for thread id/i.test(String(error?.message || error || ""));
+}
+
+function isThreadNotLoadedError(error) {
+  return /thread not loaded/i.test(String(error?.message || error || ""));
+}
+
 function isActiveWriterError(error) {
   return /already has an active writer/i.test(String(error?.message || error || ""));
 }
@@ -518,6 +526,8 @@ class CodexTelegramBot {
     this.pendingPromptQueues = new Map();
     this.drainingPromptThreads = new Set();
     this.busyQueueNotices = new Set();
+    this.unmaterializedThreadIds = new Set(this.state.unmaterializedThreadIds || []);
+    this.runtimeNewThreadIds = new Set();
 
     this.codex.on("notification", (message) => {
       this.#onCodexNotification(message).catch((error) =>
@@ -631,6 +641,7 @@ class CodexTelegramBot {
       this.pendingApprovals.size > 0 ||
       this.#hasPendingPromptWork() ||
       this.drainingPromptThreads.size > 0 ||
+      this.unmaterializedThreadIds.size > 0 ||
       this.desktopSyncRunning
     );
   }
@@ -1098,7 +1109,11 @@ class CodexTelegramBot {
   }
 
   async #selectThread(target, threadId, knownThread = null) {
+    const previousThreadId = this.#threadIdForTarget(target);
     const thread = knownThread || (await this.codex.readThread(threadId, false)).thread;
+    if (previousThreadId !== thread.id && this.unmaterializedThreadIds.has(previousThreadId)) {
+      this.#markThreadUnmaterialized(previousThreadId, false);
+    }
     if (target.messageThreadId) this.#saveTopicMapping(target.chatId, target.messageThreadId, thread);
     this.desktopSyncSuspended = true;
     this.state = this.stateStore.save({
@@ -1121,31 +1136,81 @@ class CodexTelegramBot {
   }
 
   async #newThread(target, name) {
+    const previousThreadId = this.#threadIdForTarget(target);
     const result = await this.#withWriterLease(
       () => this.codex.startThread({ cwd: this.config.defaultCwd, name: name || null }),
       "new-thread",
     );
     const thread = result.thread;
+    if (previousThreadId !== thread.id && this.unmaterializedThreadIds.has(previousThreadId)) {
+      this.#markThreadUnmaterialized(previousThreadId, false);
+    }
+    this.#markThreadUnmaterialized(thread.id, true);
+    this.runtimeNewThreadIds.add(thread.id);
     if (target.messageThreadId) this.#saveTopicMapping(target.chatId, target.messageThreadId, thread);
     this.desktopSyncSuspended = true;
     this.state = this.stateStore.save({
       currentThreadId: thread.id,
       currentThreadName: threadTitle(thread),
       lastChatId: target.chatId,
-      desktopSyncThreadId: null,
-      desktopSyncSeenTurnIds: null,
-      desktopSyncSentUserMessageIds: null,
-      desktopSyncSentUserTurnIds: null,
+      desktopSyncThreadId: thread.id,
+      desktopSyncSeenTurnIds: [],
+      desktopSyncSentUserMessageIds: [],
+      desktopSyncSentUserTurnIds: [],
     });
-    try {
-      await this.#resetDesktopSyncBaseline(thread.id);
-    } catch (error) {
-      this.logger.warn("Не удалось установить точку синхронизации нового чата", error.message);
-    } finally {
-      this.desktopSyncSuspended = false;
-    }
-    await this.#releaseThreadIfIdle(thread.id);
+    this.desktopSyncSuspended = false;
     await this.telegram.sendMessage(target, `✅ Создан и выбран новый чат:\n${threadTitle(thread)}`);
+  }
+
+  #markThreadUnmaterialized(threadId, pending) {
+    if (!threadId) return;
+    if (pending) this.unmaterializedThreadIds.add(threadId);
+    else {
+      this.unmaterializedThreadIds.delete(threadId);
+      this.runtimeNewThreadIds.delete(threadId);
+    }
+    this.state = this.stateStore.save({
+      unmaterializedThreadIds: [...this.unmaterializedThreadIds],
+    });
+  }
+
+  async #recreateUnmaterializedThread(target, oldThreadId) {
+    const rawName = this.#threadNameForTarget(target);
+    const name = rawName && rawName !== "Без названия" ? rawName : null;
+    const result = await this.codex.startThread({ cwd: this.config.defaultCwd, name });
+    const thread = result.thread;
+
+    this.#markThreadUnmaterialized(oldThreadId, false);
+    this.#markThreadUnmaterialized(thread.id, true);
+    this.runtimeNewThreadIds.add(thread.id);
+    if (target.messageThreadId) this.#saveTopicMapping(target.chatId, target.messageThreadId, thread);
+
+    const queued = this.pendingPromptQueues.get(oldThreadId);
+    if (queued?.length) {
+      this.pendingPromptQueues.delete(oldThreadId);
+      this.pendingPromptQueues.set(thread.id, [
+        ...(this.pendingPromptQueues.get(thread.id) || []),
+        ...queued,
+      ]);
+    }
+
+    const patch = {
+      lastChatId: target.chatId,
+      desktopSyncThreadId: thread.id,
+      desktopSyncSeenTurnIds: [],
+      desktopSyncSentUserMessageIds: [],
+      desktopSyncSentUserTurnIds: [],
+    };
+    if (this.state.currentThreadId === oldThreadId || !target.messageThreadId) {
+      patch.currentThreadId = thread.id;
+      patch.currentThreadName = threadTitle(thread);
+    }
+    this.state = this.stateStore.save(patch);
+    await this.telegram.sendMessage(
+      target,
+      "♻️ Новый чат восстановлен после перезапуска. Запускаю задачу.",
+    );
+    return thread.id;
   }
 
   async #syncTopics(target, argument) {
@@ -1246,6 +1311,7 @@ class CodexTelegramBot {
   async #initializeDesktopSync() {
     const threadId = this.state.currentThreadId;
     if (!threadId || !this.state.lastChatId) return;
+    if (this.unmaterializedThreadIds.has(threadId)) return;
     if (
       this.state.desktopSyncThreadId === threadId &&
       Array.isArray(this.state.desktopSyncSeenTurnIds)
@@ -1398,6 +1464,7 @@ class CodexTelegramBot {
       const threadId = this.state.currentThreadId;
       const chatId = this.state.lastChatId;
       if (!threadId || !chatId) return;
+      if (this.unmaterializedThreadIds.has(threadId)) return;
       const target = this.#targetForThreadInChat(chatId, threadId);
 
       if (
@@ -1707,14 +1774,33 @@ class CodexTelegramBot {
       return false;
     }
 
-    const [current, recentTurns] = await Promise.all([
-      this.codex.readThread(threadId, false),
-      this.codex.listTurns(threadId, { limit: 20, itemsView: "summary" }).catch((error) => {
-        if (isUnmaterializedThreadError(error)) return { data: [] };
-        throw error;
-      }),
-    ]);
-    if (isThreadBusy(current.thread) || hasActiveTurn(recentTurns.data)) {
+    let isUnmaterialized = this.unmaterializedThreadIds.has(threadId);
+    if (isUnmaterialized && !this.runtimeNewThreadIds.has(threadId)) {
+      threadId = await this.#recreateUnmaterializedThread(target, threadId);
+      isUnmaterialized = true;
+    }
+
+    let current = { thread: { status: { type: "idle" }, turns: [] } };
+    let recentTurns = { data: [] };
+    if (!isUnmaterialized) {
+      try {
+        [current, recentTurns] = await Promise.all([
+          this.codex.readThread(threadId, false),
+          this.codex.listTurns(threadId, { limit: 20, itemsView: "summary" }).catch((error) => {
+            if (isUnmaterializedThreadError(error)) return { data: [] };
+            throw error;
+          }),
+        ]);
+      } catch (error) {
+        if (isMissingRolloutError(error)) {
+          threadId = await this.#recreateUnmaterializedThread(target, threadId);
+          isUnmaterialized = true;
+        } else if (!isThreadNotLoadedError(error) && !isUnmaterializedThreadError(error)) {
+          throw error;
+        }
+      }
+    }
+    if (!isUnmaterialized && (isThreadBusy(current.thread) || hasActiveTurn(recentTurns.data))) {
       if (options.queueWhenBusy) {
         await this.#notifyQueuedBusyOnce(
           threadId,
@@ -1737,9 +1823,12 @@ class CodexTelegramBot {
 
     this.#cancelWriterRelease();
     try {
-      await this.codex.resumeThread(threadId);
+      if (!isUnmaterialized) await this.codex.resumeThread(threadId);
     } catch (error) {
-      if (isActiveWriterError(error)) {
+      if (isMissingRolloutError(error)) {
+        threadId = await this.#recreateUnmaterializedThread(target, threadId);
+        isUnmaterialized = true;
+      } else if (isActiveWriterError(error)) {
         if (this.config.activeWriterMode === "fork") {
           try {
             threadId = await this.#forkThreadForTelegram(target, threadId);
@@ -1795,6 +1884,7 @@ class CodexTelegramBot {
 
     try {
       const result = await this.codex.startTurn(threadId, text);
+      if (isUnmaterialized) this.#markThreadUnmaterialized(threadId, false);
       context.turnId = result.turn.id;
       this.#rememberTurn(context.turnId, true, {
         threadId,
