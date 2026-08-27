@@ -1,6 +1,11 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const { CodexClient, buildCodexAppServerArgs } = require("../src/codex-client");
+const {
+  CHAT_TOOLS_SERVER_NAME,
+  CodexClient,
+  buildChatToolsOverrides,
+  buildCodexAppServerArgs,
+} = require("../src/codex-client");
 
 test("app-server starts with default cwd as an additional sandbox directory", () => {
   assert.deepEqual(
@@ -201,4 +206,67 @@ test("listTurns falls back to persisted thread history without a writer", async 
 
   const result = await client.listTurns("thread-1", { limit: 1 });
   assert.deepEqual(result.data.map((turn) => turn.id), ["newer"]);
+});
+
+test("chat tools bridge can be switched on for old and new chats", async () => {
+  const launch = {
+    command: "C:\\Codex\\codex.exe",
+    argsPrefix: ["wrapper"],
+  };
+  const overrides = buildChatToolsOverrides({
+    enabled: true,
+    launch,
+    cwd: "C:\\Project",
+  });
+  const server = overrides.config.mcp_servers[CHAT_TOOLS_SERVER_NAME];
+  assert.equal(server.command, process.execPath);
+  assert.match(server.args[0], /codex-chat-mcp\.js$/);
+  assert.equal(server.env.CODEX_CHAT_BRIDGE_COMMAND, launch.command);
+  assert.equal(server.env.CODEX_CHAT_BRIDGE_ARGS, '["wrapper"]');
+  assert.deepEqual(buildChatToolsOverrides({ enabled: false, launch, cwd: "C:\\Project" }), {});
+
+  const calls = [];
+  const client = new CodexClient({
+    launch,
+    cwd: "C:\\Project",
+    appToolsEnabled: true,
+    logger: { info() {}, debug() {}, warn() {}, error() {} },
+  });
+  client.request = async (method, params) => {
+    calls.push({ method, params });
+    if (method === "thread/start") return { thread: { id: "new" } };
+    if (method === "thread/resume") return {};
+    if (method === "thread/fork") return { thread: { id: "fork" } };
+    return {};
+  };
+  await client.startThread({ cwd: "C:\\Project" });
+  await client.resumeThread("old");
+  await client.forkThread("source");
+  for (const call of calls) {
+    assert.ok(call.params.config.mcp_servers[CHAT_TOOLS_SERVER_NAME]);
+  }
+});
+
+test("persisted turn pagination uses a local cursor without acquiring a writer", async () => {
+  const calls = [];
+  const client = new CodexClient({
+    launch: {},
+    cwd: "C:\\Project",
+    logger: { info() {}, debug() {}, warn() {}, error() {} },
+  });
+  client.request = async (method) => {
+    calls.push(method);
+    if (method === "thread/read") {
+      return { thread: { turns: [
+        { id: "third", startedAt: 30 },
+        { id: "second", startedAt: 20 },
+        { id: "first", startedAt: 10 },
+      ] } };
+    }
+    throw new Error("unexpected request");
+  };
+  const result = await client.listTurns("thread-1", { limit: 1, cursor: "local:1" });
+  assert.deepEqual(result.data.map((turn) => turn.id), ["second"]);
+  assert.equal(result.nextCursor, "local:2");
+  assert.deepEqual(calls, ["thread/read"]);
 });

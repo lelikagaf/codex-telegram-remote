@@ -1702,6 +1702,7 @@ class CodexTelegramBot {
       `Задача: ${active ? "выполняется" : "нет активной"}`,
       `Ожидает взаимодействия: ${approvals.length}`,
       `Полный доступ: ${this.config.codexFullAccess ? "включён" : "выключен"}`,
+      `Доступ к другим чатам: ${this.config.codexAppToolsEnabled ? "включён" : "выключен"}`,
       `Подтверждения: ${this.config.codexFullAccess ? "never" : this.config.codexApprovalPolicy}`,
       `Конфликт с Desktop: ${this.config.activeWriterMode || "queue"}`,
       `Загружено ботом чатов: ${this.codex.loadedThreadCount ?? "неизвестно"}`,
@@ -1711,15 +1712,18 @@ class CodexTelegramBot {
 
   async #showAccess(chatId) {
     const fullAccess = Boolean(this.config.codexFullAccess);
+    const appToolsEnabled = Boolean(this.config.codexAppToolsEnabled);
     await this.telegram.sendMessage(
       chatId,
       [
         `Режим: ${fullAccess ? "ПОЛНЫЙ ДОСТУП" : "ограниченный"}`,
         `Подтверждения Codex: ${fullAccess ? "never" : this.config.codexApprovalPolicy}`,
         `Песочница: ${fullAccess ? "danger-full-access" : "по настройкам Codex"}`,
+        `Другие чаты Codex: ${appToolsEnabled ? "доступны для поиска и чтения" : "недоступны"}`,
         `Конфликт writer с Desktop: ${this.config.activeWriterMode || "queue"}`,
         "Область: каждый новый ход через Telegram, во всех старых и новых чатах.",
         "Computer Use и плагины наследуются от Codex; отдельные системные ограничения Windows и приложений сохраняются.",
+        "Отключение доступа к другим чатам: CODEX_APP_TOOLS_ENABLED=false и перезапуск задачи.",
       ].join("\n"),
     );
   }

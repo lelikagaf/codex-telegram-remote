@@ -108,6 +108,7 @@ function loadConfig(projectRoot) {
     codexBinary: (process.env.CODEX_BINARY || "").trim() || null,
     codexApprovalPolicy: parseApprovalPolicy(process.env.CODEX_APPROVAL_POLICY),
     codexFullAccess: parseBoolean(process.env.CODEX_FULL_ACCESS, false),
+    codexAppToolsEnabled: parseBoolean(process.env.CODEX_APP_TOOLS_ENABLED, false),
     activeWriterMode: parseActiveWriterMode(process.env.CODEX_ACTIVE_WRITER_MODE),
     defaultCwd,
     notifyOnStart: parseBoolean(process.env.TELEGRAM_NOTIFY_ON_START, true),

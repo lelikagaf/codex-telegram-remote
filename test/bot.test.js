@@ -1205,6 +1205,36 @@ test("Telegram-документ скачивается без лимита и п
   assert.equal(sent.some((item) => /поставлен.*в очередь/i.test(item.text)), false);
 });
 
+test("/access reports switchable cross-chat access", async () => {
+  const sent = [];
+  const telegram = new EventEmitter();
+  telegram.sendMessage = async (chatId, text) => {
+    sent.push({ chatId, text });
+    return { message_id: sent.length };
+  };
+  const codex = new EventEmitter();
+  const bot = new CodexTelegramBot({
+    telegram,
+    codex,
+    stateStore: createStateStore(),
+    config: {
+      allowedUserId: 7,
+      desktopSyncPollMs: 1000,
+      codexFullAccess: true,
+      codexAppToolsEnabled: true,
+      activeWriterMode: "fork",
+    },
+    logger: createLogger(),
+  });
+
+  await bot.handleUpdate({
+    message: { from: { id: 7 }, chat: { id: 100 }, text: "/access" },
+  });
+
+  assert.match(sent.at(-1).text, /Другие чаты Codex: доступны для поиска и чтения/);
+  assert.match(sent.at(-1).text, /CODEX_APP_TOOLS_ENABLED=false/);
+});
+
 test("Telegram-документ больше настроенного лимита отклоняется до скачивания", async () => {
   const sent = [];
   let downloadCalls = 0;

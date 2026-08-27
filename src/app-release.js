@@ -156,6 +156,18 @@ const RELEASE_HISTORY = [
       "Queue notices are now reserved for real Desktop or Telegram writer contention.",
     ],
   },
+  {
+    id: "2026-08-27-cross-chat-access",
+    version: "0.1.15",
+    sequence: 15,
+    title: "Cross-chat access for Telegram",
+    notes: [
+      "Telegram-started Codex tasks can now find and read other local Codex chats, including archived history.",
+      "The read-only chat bridge is attached to old, new, and automatically forked chats.",
+      "Added CODEX_APP_TOOLS_ENABLED so cross-chat access can be disabled independently of filesystem, network, and SSH access.",
+      "/access and /status now report whether cross-chat tools are enabled.",
+    ],
+  },
 ];
 
 const CURRENT_RELEASE = RELEASE_HISTORY.at(-1);

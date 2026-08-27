@@ -1,6 +1,31 @@
 const { EventEmitter } = require("node:events");
 const { spawn } = require("node:child_process");
+const path = require("node:path");
 const readline = require("node:readline");
+
+const CHAT_TOOLS_SERVER_NAME = "codex_telegram_chats";
+
+function buildChatToolsOverrides({ enabled, launch, cwd }) {
+  if (!enabled) return {};
+  const serverPath = path.resolve(__dirname, "..", "scripts", "codex-chat-mcp.js");
+  return {
+    config: {
+      mcp_servers: {
+        [CHAT_TOOLS_SERVER_NAME]: {
+          command: process.execPath,
+          args: [serverPath],
+          env: {
+            CODEX_CHAT_BRIDGE_COMMAND: launch.command,
+            CODEX_CHAT_BRIDGE_ARGS: JSON.stringify(launch.argsPrefix || []),
+            CODEX_CHAT_BRIDGE_CWD: cwd,
+          },
+          startup_timeout_sec: 30,
+          tool_timeout_sec: 120,
+        },
+      },
+    },
+  };
+}
 
 function buildCodexAppServerArgs({
   argsPrefix = [],
@@ -32,12 +57,20 @@ class CodexRpcError extends Error {
 }
 
 class CodexClient extends EventEmitter {
-  constructor({ launch, cwd, approvalPolicy = "never", fullAccess = false, logger }) {
+  constructor({
+    launch,
+    cwd,
+    approvalPolicy = "never",
+    fullAccess = false,
+    appToolsEnabled = false,
+    logger,
+  }) {
     super();
     this.launch = launch;
     this.cwd = cwd;
     this.approvalPolicy = approvalPolicy;
     this.fullAccess = fullAccess;
+    this.appToolsEnabled = appToolsEnabled;
     this.logger = logger;
     this.child = null;
     this.lineReader = null;
@@ -67,6 +100,7 @@ class CodexClient extends EventEmitter {
       cwd: this.cwd,
       approvalPolicy: this.fullAccess ? "never" : this.approvalPolicy,
       fullAccess: this.fullAccess,
+      appToolsEnabled: this.appToolsEnabled,
     });
     this.loadedThreads.clear();
     this.child = spawn(
@@ -206,10 +240,12 @@ class CodexClient extends EventEmitter {
     this.#write({ id, error: { code, message } });
   }
 
-  async listThreads({ limit = 10, cursor = null } = {}) {
+  async listThreads({ limit = 10, cursor = null, searchTerm = null, archived = false } = {}) {
     const params = {
       cursor,
       limit,
+      searchTerm,
+      archived,
       sortKey: "recency_at",
       sortDirection: "desc",
       sourceKinds: ["cli", "vscode", "exec", "appServer", "unknown"],
@@ -226,27 +262,37 @@ class CodexClient extends EventEmitter {
     return this.request("thread/read", { threadId, includeTurns });
   }
 
-  async listTurns(threadId, { limit = 50, itemsView = "full" } = {}) {
-    try {
-      return await this.request("thread/turns/list", {
-        threadId,
-        limit,
-        sortDirection: "desc",
-        itemsView,
-      });
-    } catch (error) {
-      if (!/thread not loaded/i.test(String(error?.message || error))) throw error;
-
-      // thread/read can inspect persisted history without acquiring the thread writer.
-      const result = await this.readThread(threadId, true);
-      const turns = Array.isArray(result.thread?.turns) ? [...result.thread.turns] : [];
-      turns.sort((left, right) => {
-        const leftTime = left.completedAt || left.startedAt || 0;
-        const rightTime = right.completedAt || right.startedAt || 0;
-        return rightTime - leftTime || String(right.id || "").localeCompare(String(left.id || ""));
-      });
-      return { data: turns.slice(0, limit), nextCursor: null };
+  async listTurns(threadId, { limit = 50, cursor = null, itemsView = "full" } = {}) {
+    const localOffset = /^local:(\d+)$/.exec(String(cursor || ""));
+    if (!localOffset) {
+      try {
+        return await this.request("thread/turns/list", {
+          threadId,
+          limit,
+          cursor,
+          sortDirection: "desc",
+          itemsView,
+        });
+      } catch (error) {
+        if (!/thread not loaded/i.test(String(error?.message || error))) throw error;
+      }
     }
+
+    // thread/read can inspect persisted history without acquiring the thread writer.
+    const result = await this.readThread(threadId, true);
+    const turns = Array.isArray(result.thread?.turns) ? [...result.thread.turns] : [];
+    turns.sort((left, right) => {
+      const leftTime = left.completedAt || left.startedAt || 0;
+      const rightTime = right.completedAt || right.startedAt || 0;
+      return rightTime - leftTime || String(right.id || "").localeCompare(String(left.id || ""));
+    });
+    const offset = localOffset ? Number(localOffset[1]) : 0;
+    const data = turns.slice(offset, offset + limit);
+    const nextOffset = offset + data.length;
+    return {
+      data,
+      nextCursor: nextOffset < turns.length ? `local:${nextOffset}` : null,
+    };
   }
 
   async resumeThread(threadId) {
@@ -256,9 +302,14 @@ class CodexClient extends EventEmitter {
     const accessOverrides = this.fullAccess
       ? { approvalPolicy: "never", sandbox: "danger-full-access" }
       : {};
+    const appToolsOverrides = buildChatToolsOverrides({
+      enabled: this.appToolsEnabled,
+      launch: this.launch,
+      cwd: this.cwd,
+    });
     const result = await this.request(
       "thread/resume",
-      { threadId, ...accessOverrides },
+      { threadId, ...accessOverrides, ...appToolsOverrides },
       120000,
     );
     this.loadedThreads.add(threadId);
@@ -274,12 +325,18 @@ class CodexClient extends EventEmitter {
     const accessOverrides = this.fullAccess
       ? { approvalPolicy: "never", sandbox: "danger-full-access" }
       : {};
+    const appToolsOverrides = buildChatToolsOverrides({
+      enabled: this.appToolsEnabled,
+      launch: this.launch,
+      cwd: this.cwd,
+    });
     const result = await this.request(
       "thread/start",
       {
         cwd,
         serviceName: "codex_telegram_remote",
         ...accessOverrides,
+        ...appToolsOverrides,
       },
       120000,
     );
@@ -300,11 +357,17 @@ class CodexClient extends EventEmitter {
     const accessOverrides = this.fullAccess
       ? { approvalPolicy: "never", sandbox: "danger-full-access" }
       : {};
+    const appToolsOverrides = buildChatToolsOverrides({
+      enabled: this.appToolsEnabled,
+      launch: this.launch,
+      cwd: this.cwd,
+    });
     const result = await this.request(
       "thread/fork",
       {
         threadId,
         ...accessOverrides,
+        ...appToolsOverrides,
       },
       120000,
     );
@@ -400,4 +463,10 @@ class CodexClient extends EventEmitter {
   }
 }
 
-module.exports = { CodexClient, CodexRpcError, buildCodexAppServerArgs };
+module.exports = {
+  CHAT_TOOLS_SERVER_NAME,
+  CodexClient,
+  CodexRpcError,
+  buildChatToolsOverrides,
+  buildCodexAppServerArgs,
+};

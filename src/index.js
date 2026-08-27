@@ -69,6 +69,7 @@ async function main() {
     cwd: config.defaultCwd,
     approvalPolicy: config.codexApprovalPolicy,
     fullAccess: config.codexFullAccess,
+    appToolsEnabled: config.codexAppToolsEnabled,
     logger,
   });
   bot = new CodexTelegramBot({ telegram, codex, stateStore, config, logger, releaseTracker });

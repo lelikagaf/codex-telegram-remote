@@ -129,6 +129,7 @@ CODEX_DEFAULT_CWD=
 CODEX_BINARY=
 CODEX_APPROVAL_POLICY=never
 CODEX_FULL_ACCESS=false
+CODEX_APP_TOOLS_ENABLED=false
 CODEX_ACTIVE_WRITER_MODE=queue
 TELEGRAM_NOTIFY_ON_START=true
 TELEGRAM_NOTIFY_AFTER_SLEEP=false
@@ -146,6 +147,12 @@ LOG_LEVEL=info
 старых и новых чатов и каждого хода, запущенного через Telegram. При значении
 `false` действует `CODEX_APPROVAL_POLICY`, где доступны `never`, `on-request`
 и `untrusted`.
+`CODEX_APP_TOOLS_ENABLED=true` подключает к каждому старому, новому и
+автоматически созданному fork-чату локальные инструменты поиска и чтения
+истории всех чатов Codex этого компьютера. Поэтому модель может найти чат по
+названию и изучить его переписку. Инструменты сделаны только для чтения: они
+не удаляют, не архивируют и не переименовывают чужие чаты. Значение `false`
+полностью убирает этот мост, не отключая SSH, файловый доступ или сеть.
 `CODEX_ACTIVE_WRITER_MODE=queue` ждёт, пока Codex Desktop освободит выбранный
 чат. Значение `fork` автоматически создаёт продолжение с той же историей и
 выполняет Telegram-задачу там, если Desktop удерживает исходный writer.
@@ -210,6 +217,9 @@ powershell -ExecutionPolicy Bypass -File .\scripts\uninstall-autostart.ps1
 - `CODEX_FULL_ACCESS=true` дополнительно отключает sandbox и принудительно
   задаёт `approvalPolicy: never` и `sandboxPolicy: dangerFullAccess` для каждого
   задания из Telegram. Используйте только для бота с проверенным владельцем.
+- `CODEX_APP_TOOLS_ENABLED=true` разрешает модели читать локальную историю
+  других чатов через изолированный read-only MCP-мост. Переключатель можно
+  отключить независимо от полного системного доступа.
 - Бот получает доступ к тем же файлам, что и вошедший пользователь Windows.
 - Не запускайте весь бот с постоянными правами администратора.
 - Не храните рабочий экземпляр на общедоступном сетевом диске.
