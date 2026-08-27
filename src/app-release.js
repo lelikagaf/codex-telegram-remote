@@ -145,6 +145,17 @@ const RELEASE_HISTORY = [
       "Legacy orphaned chats that report no rollout are recovered without manual chat selection.",
     ],
   },
+  {
+    id: "2026-08-27-accurate-queue-notices",
+    version: "0.1.14",
+    sequence: 14,
+    title: "Accurate queue notices",
+    notes: [
+      "Normal Telegram messages start without a misleading queue notification.",
+      "Document batches also stay silent unless they are actually waiting for a busy Codex chat.",
+      "Queue notices are now reserved for real Desktop or Telegram writer contention.",
+    ],
+  },
 ];
 
 const CURRENT_RELEASE = RELEASE_HISTORY.at(-1);

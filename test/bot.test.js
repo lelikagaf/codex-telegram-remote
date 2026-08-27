@@ -587,11 +587,11 @@ test("финал Telegram-turn отправляется новым сообще�
   assert.deepEqual(
     sent.map((item) => [item.kind, item.text]),
     [
-      ["message", "✉️ Сообщение поставлено в очередь обработки: 1."],
       ["message", "⏳ Codex начинает работу…"],
       ["final", "Готово"],
     ],
   );
+  assert.equal(sent.some((item) => /поставлен.*в очередь/i.test(item.text)), false);
   assert.equal(edits.at(-1).text, "✅ Codex завершил работу. Ответ отправлен следующим сообщением.");
   assert.deepEqual(stateStore.state.telegramPendingFinals, []);
   assert.equal(unsubscribeCalls, 1);
@@ -934,7 +934,7 @@ test("очередь Telegram запускается после завершен
     message: { from: { id: 7 }, chat: { id: 100 }, text: "Запусти после Desktop" },
   });
 
-  await waitFor(() => sent.some((item) => /очередь/.test(item.text)));
+  await waitFor(() => sent.some((item) => /задача остаётся в очереди/i.test(item.text)));
   assert.equal(prompts.length, 0);
 
   desktopBusy = false;
@@ -1202,6 +1202,7 @@ test("Telegram-документ скачивается без лимита и п
   assert.match(prompt, /55-Bridge8_Vision_\.md/);
   assert.match(edits[0].text, /без ограничения/);
   assert.equal(sent.at(-1).text, "⏳ Codex начинает работу…");
+  assert.equal(sent.some((item) => /поставлен.*в очередь/i.test(item.text)), false);
 });
 
 test("Telegram-документ больше настроенного лимита отклоняется до скачивания", async () => {

@@ -948,7 +948,7 @@ class CodexTelegramBot {
         threadId,
         target,
         prompt,
-        { messagePrefix: "✉️ Сообщение поставлено в очередь обработки" },
+        { silent: true },
       );
       await this.#drainPromptQueue(threadId);
       return;
@@ -1022,7 +1022,7 @@ class CodexTelegramBot {
         threadId,
         target,
         buildIncomingBatchPrompt({ documents: downloadedDocuments, messages: textItems }),
-        { messagePrefix: "📚 Документы поставлены в очередь обработки" },
+        { silent: true },
       );
       await this.#drainPromptQueue(threadId);
     } catch (error) {
