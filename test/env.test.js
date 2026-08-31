@@ -6,6 +6,8 @@ const {
   parseBoolean,
   parseEnv,
   parseFileSizeLimitMb,
+  parseNonNegativeInteger,
+  parseOutgoingFileAccess,
 } = require("../src/env");
 
 test("parseEnv читает значения и кавычки", () => {
@@ -37,6 +39,13 @@ test("parseActiveWriterMode принимает очередь и fork", () => {
   assert.throws(() => parseActiveWriterMode("takeover"), /CODEX_ACTIVE_WRITER_MODE/);
 });
 
+test("parseOutgoingFileAccess принимает управляемые режимы", () => {
+  assert.equal(parseOutgoingFileAccess(undefined), "workspace");
+  assert.equal(parseOutgoingFileAccess("ALL"), "all");
+  assert.equal(parseOutgoingFileAccess("off"), "off");
+  assert.throws(() => parseOutgoingFileAccess("anywhere"), /TELEGRAM_OUTGOING_FILE_ACCESS/);
+});
+
 test("лимит файла принимает мегабайты, 0 и -1", () => {
   assert.equal(parseFileSizeLimitMb("25"), 25 * 1024 * 1024);
   assert.equal(parseFileSizeLimitMb("0"), 0);
@@ -47,4 +56,16 @@ test("лимит файла принимает мегабайты, 0 и -1", () 
 test("лимит файла отклоняет остальные отрицательные и некорректные значения", () => {
   assert.throws(() => parseFileSizeLimitMb("-2"), /TELEGRAM_MAX_FILE_SIZE_MB/);
   assert.throws(() => parseFileSizeLimitMb("много"), /TELEGRAM_MAX_FILE_SIZE_MB/);
+  assert.throws(
+    () => parseFileSizeLimitMb("много", 50, "TELEGRAM_OUTGOING_MAX_FILE_SIZE_MB"),
+    /TELEGRAM_OUTGOING_MAX_FILE_SIZE_MB/,
+  );
+});
+
+test("целочисленный лимит принимает 0 как отсутствие ограничения", () => {
+  assert.equal(parseNonNegativeInteger(undefined, 10, "LIMIT"), 10);
+  assert.equal(parseNonNegativeInteger("0", 10, "LIMIT"), 0);
+  assert.equal(parseNonNegativeInteger("25", 10, "LIMIT"), 25);
+  assert.throws(() => parseNonNegativeInteger("-1", 10, "LIMIT"), /LIMIT/);
+  assert.throws(() => parseNonNegativeInteger("1.5", 10, "LIMIT"), /LIMIT/);
 });

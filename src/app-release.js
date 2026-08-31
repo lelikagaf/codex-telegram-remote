@@ -180,6 +180,18 @@ const RELEASE_HISTORY = [
       "This restores shell, SSH, skills, and other code-mode tools after an incomplete Codex cleanup leaves duplicate binaries.",
     ],
   },
+  {
+    id: "2026-08-31-configurable-outgoing-file-access",
+    version: "0.1.17",
+    sequence: 17,
+    title: "Configurable full outgoing file access",
+    notes: [
+      "Added TELEGRAM_OUTGOING_FILE_ACCESS with off, workspace, and all modes.",
+      "Full mode can send referenced files from any readable local path, including files created in other Codex chats.",
+      "Added configurable outgoing file size and per-answer count limits; zero disables each bot-side limit.",
+      "/access and /status now expose the effective outgoing file access mode.",
+    ],
+  },
 ];
 
 const CURRENT_RELEASE = RELEASE_HISTORY.at(-1);

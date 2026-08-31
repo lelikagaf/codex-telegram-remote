@@ -87,11 +87,20 @@ start-bot.cmd
 
 ```dotenv
 TELEGRAM_MAX_FILE_SIZE_MB=0
+TELEGRAM_OUTGOING_FILE_ACCESS=workspace
+TELEGRAM_OUTGOING_MAX_FILE_SIZE_MB=50
+TELEGRAM_OUTGOING_MAX_FILES=10
 ```
 
 Положительное значение ограничивает размер документа в мегабайтах. `0` или
 `-1` означает отсутствие ограничения со стороны бота. Ограничение проверяется
 по метаданным Telegram и повторно во время фактической загрузки.
+
+Для исходящих файлов `TELEGRAM_OUTGOING_FILE_ACCESS=all` разрешает отправку из
+любого читаемого локального пути; `workspace` оставляет только
+`CODEX_DEFAULT_CWD`, а `off` отключает отправку. Значения `0` для
+`TELEGRAM_OUTGOING_MAX_FILE_SIZE_MB` и `TELEGRAM_OUTGOING_MAX_FILES` снимают
+внутренние лимиты бота.
 
 ## Смысл исправления синхронизации
 

@@ -355,30 +355,60 @@ function hasDeniedOutgoingPathSegment(filePath) {
     .some((segment) => TELEGRAM_OUTGOING_DENIED_SEGMENTS.has(segment.toLowerCase()));
 }
 
-function isAllowedOutgoingTelegramFile(filePath, roots) {
+function outgoingTelegramFileRejectionReason(
+  filePath,
+  { access = "workspace", roots = [], maxFileBytes = TELEGRAM_OUTGOING_FILE_LIMIT_BYTES } = {},
+) {
   const resolved = path.resolve(filePath);
-  if (!roots.some((root) => isPathInsideDirectory(resolved, root))) return false;
+  if (access === "off") return "disabled";
+  if (access !== "all" && !roots.some((root) => isPathInsideDirectory(resolved, root))) {
+    return "outside-workspace";
+  }
   const basename = path.basename(resolved).toLowerCase();
-  if (TELEGRAM_OUTGOING_DENIED_NAMES.has(basename) || basename.startsWith(".env")) return false;
-  if (hasDeniedOutgoingPathSegment(resolved)) return false;
+  if (
+    access !== "all" &&
+    (TELEGRAM_OUTGOING_DENIED_NAMES.has(basename) || basename.startsWith(".env"))
+  ) {
+    return "protected-name";
+  }
+  if (access !== "all" && hasDeniedOutgoingPathSegment(resolved)) return "protected-directory";
   let stat = null;
   try {
     stat = fs.statSync(resolved);
   } catch {
-    return false;
+    return "not-found";
   }
-  return stat.isFile() && stat.size <= TELEGRAM_OUTGOING_FILE_LIMIT_BYTES;
+  if (!stat.isFile()) return "not-a-file";
+  if (maxFileBytes > 0 && stat.size > maxFileBytes) return "too-large";
+  return null;
 }
 
-function collectOutgoingTelegramFiles(text, { roots = [], limitCount = TELEGRAM_OUTGOING_FILE_LIMIT_COUNT } = {}) {
+function collectOutgoingTelegramFiles(
+  text,
+  {
+    access = "workspace",
+    roots = [],
+    maxFileBytes = TELEGRAM_OUTGOING_FILE_LIMIT_BYTES,
+    limitCount = TELEGRAM_OUTGOING_FILE_LIMIT_COUNT,
+    onRejected = null,
+  } = {},
+) {
   const allowedRoots = roots.map((root) => path.resolve(root)).filter(Boolean);
-  if (!allowedRoots.length) return [];
+  if (access === "off" || (access !== "all" && !allowedRoots.length)) return [];
 
   const files = [];
   const seen = new Set();
   for (const candidate of extractLocalFilePathCandidates(text)) {
     const resolved = path.resolve(candidate);
-    if (!isAllowedOutgoingTelegramFile(resolved, allowedRoots)) continue;
+    const rejectionReason = outgoingTelegramFileRejectionReason(resolved, {
+      access,
+      roots: allowedRoots,
+      maxFileBytes,
+    });
+    if (rejectionReason) {
+      onRejected?.({ filePath: resolved, reason: rejectionReason });
+      continue;
+    }
 
     let realPath = resolved;
     try {
@@ -389,7 +419,7 @@ function collectOutgoingTelegramFiles(text, { roots = [], limitCount = TELEGRAM_
     seen.add(key);
 
     files.push(resolved);
-    if (files.length >= limitCount) break;
+    if (limitCount > 0 && files.length >= limitCount) break;
   }
   return files;
 }
@@ -549,6 +579,11 @@ class CodexTelegramBot {
 
   async initialize() {
     this.#initializeTelegramFinalDeliveryTracking();
+    this.logger.info("Настройки исходящих файлов Telegram", {
+      access: this.config.telegramOutgoingFileAccess || "workspace",
+      maxFileBytes: this.config.telegramOutgoingMaxFileBytes,
+      maxFiles: this.config.telegramOutgoingMaxFiles,
+    });
     await this.telegram.deleteWebhook();
     await this.telegram.setMyCommands([
       { command: "chats", description: "Список чатов Codex" },
@@ -1402,9 +1437,26 @@ class CodexTelegramBot {
 
   async #sendOutgoingTelegramFiles(chatId, text) {
     if (typeof this.telegram.sendDocument !== "function") return [];
+    const access = this.config.telegramOutgoingFileAccess || "workspace";
     const files = collectOutgoingTelegramFiles(text, {
+      access,
       roots: [this.config.defaultCwd],
-      limitCount: TELEGRAM_OUTGOING_FILE_LIMIT_COUNT,
+      maxFileBytes:
+        this.config.telegramOutgoingMaxFileBytes === undefined
+          ? TELEGRAM_OUTGOING_FILE_LIMIT_BYTES
+          : this.config.telegramOutgoingMaxFileBytes,
+      limitCount:
+        this.config.telegramOutgoingMaxFiles === undefined
+          ? TELEGRAM_OUTGOING_FILE_LIMIT_COUNT
+          : this.config.telegramOutgoingMaxFiles,
+      onRejected: ({ filePath, reason }) => {
+        if (reason === "not-found" || reason === "not-a-file") return;
+        this.logger.warn("Исходящий файл Telegram отклонён настройками", {
+          fileName: path.basename(filePath),
+          reason,
+          access,
+        });
+      },
     });
     const sent = [];
     for (const filePath of files) {
@@ -1703,6 +1755,7 @@ class CodexTelegramBot {
       `Ожидает взаимодействия: ${approvals.length}`,
       `Полный доступ: ${this.config.codexFullAccess ? "включён" : "выключен"}`,
       `Доступ к другим чатам: ${this.config.codexAppToolsEnabled ? "включён" : "выключен"}`,
+      `Отправка локальных файлов: ${this.config.telegramOutgoingFileAccess || "workspace"}`,
       `Подтверждения: ${this.config.codexFullAccess ? "never" : this.config.codexApprovalPolicy}`,
       `Конфликт с Desktop: ${this.config.activeWriterMode || "queue"}`,
       `Загружено ботом чатов: ${this.codex.loadedThreadCount ?? "неизвестно"}`,
@@ -1713,6 +1766,7 @@ class CodexTelegramBot {
   async #showAccess(chatId) {
     const fullAccess = Boolean(this.config.codexFullAccess);
     const appToolsEnabled = Boolean(this.config.codexAppToolsEnabled);
+    const outgoingFileAccess = this.config.telegramOutgoingFileAccess || "workspace";
     await this.telegram.sendMessage(
       chatId,
       [
@@ -1720,10 +1774,13 @@ class CodexTelegramBot {
         `Подтверждения Codex: ${fullAccess ? "never" : this.config.codexApprovalPolicy}`,
         `Песочница: ${fullAccess ? "danger-full-access" : "по настройкам Codex"}`,
         `Другие чаты Codex: ${appToolsEnabled ? "доступны для поиска, чтения и отправки сообщений" : "недоступны"}`,
+        `Локальные файлы → Telegram: ${outgoingFileAccess === "all" ? "вся файловая система текущего пользователя" : outgoingFileAccess === "off" ? "отключено" : `только ${this.config.defaultCwd}`}`,
+        `Лимит исходящего файла: ${formatFileSizeLimit(this.config.telegramOutgoingMaxFileBytes)}`,
+        `Файлов из одного ответа: ${this.config.telegramOutgoingMaxFiles > 0 ? this.config.telegramOutgoingMaxFiles : "без ограничения"}`,
         `Конфликт writer с Desktop: ${this.config.activeWriterMode || "queue"}`,
         "Область: каждый новый ход через Telegram, во всех старых и новых чатах.",
         "Computer Use и плагины наследуются от Codex; отдельные системные ограничения Windows и приложений сохраняются.",
-        "Отключение доступа к другим чатам: CODEX_APP_TOOLS_ENABLED=false и перезапуск задачи.",
+        "Отключение доступа к другим чатам: CODEX_APP_TOOLS_ENABLED=false; файлов: TELEGRAM_OUTGOING_FILE_ACCESS=off. Затем перезапустить задачу.",
       ].join("\n"),
     );
   }

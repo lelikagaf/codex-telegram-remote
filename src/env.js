@@ -57,11 +57,21 @@ function parseActiveWriterMode(value) {
   throw error;
 }
 
-function parseFileSizeLimitMb(value, fallback = 0) {
+function parseOutgoingFileAccess(value) {
+  const mode = String(value || "workspace").trim().toLowerCase();
+  if (["off", "workspace", "all"].includes(mode)) return mode;
+  const error = new Error(
+    "TELEGRAM_OUTGOING_FILE_ACCESS должен быть off, workspace или all.",
+  );
+  error.exitCode = 78;
+  throw error;
+}
+
+function parseFileSizeLimitMb(value, fallback = 0, variableName = "TELEGRAM_MAX_FILE_SIZE_MB") {
   const raw = value === undefined || String(value).trim() === "" ? fallback : Number(value);
   if (!Number.isFinite(raw) || raw < -1 || (raw < 0 && raw !== -1)) {
     const error = new Error(
-      "TELEGRAM_MAX_FILE_SIZE_MB должен быть положительным числом, 0 или -1.",
+      `${variableName} должен быть положительным числом, 0 или -1.`,
     );
     error.exitCode = 78;
     throw error;
@@ -70,11 +80,21 @@ function parseFileSizeLimitMb(value, fallback = 0) {
 
   const bytes = Math.floor(raw * 1024 * 1024);
   if (!Number.isSafeInteger(bytes) || bytes < 1) {
-    const error = new Error("TELEGRAM_MAX_FILE_SIZE_MB выходит за допустимый диапазон.");
+    const error = new Error(`${variableName} выходит за допустимый диапазон.`);
     error.exitCode = 78;
     throw error;
   }
   return bytes;
+}
+
+function parseNonNegativeInteger(value, fallback, variableName) {
+  const raw = value === undefined || String(value).trim() === "" ? fallback : Number(value);
+  if (!Number.isSafeInteger(raw) || raw < 0) {
+    const error = new Error(`${variableName} должен быть целым неотрицательным числом.`);
+    error.exitCode = 78;
+    throw error;
+  }
+  return raw;
 }
 
 function loadConfig(projectRoot) {
@@ -114,6 +134,19 @@ function loadConfig(projectRoot) {
     notifyOnStart: parseBoolean(process.env.TELEGRAM_NOTIFY_ON_START, true),
     notifyAfterSleep: parseBoolean(process.env.TELEGRAM_NOTIFY_AFTER_SLEEP, false),
     telegramMaxFileBytes: parseFileSizeLimitMb(process.env.TELEGRAM_MAX_FILE_SIZE_MB, 0),
+    telegramOutgoingFileAccess: parseOutgoingFileAccess(
+      process.env.TELEGRAM_OUTGOING_FILE_ACCESS,
+    ),
+    telegramOutgoingMaxFileBytes: parseFileSizeLimitMb(
+      process.env.TELEGRAM_OUTGOING_MAX_FILE_SIZE_MB,
+      50,
+      "TELEGRAM_OUTGOING_MAX_FILE_SIZE_MB",
+    ),
+    telegramOutgoingMaxFiles: parseNonNegativeInteger(
+      process.env.TELEGRAM_OUTGOING_MAX_FILES,
+      10,
+      "TELEGRAM_OUTGOING_MAX_FILES",
+    ),
     resumeGapMs:
       Math.max(30, Number(process.env.RESUME_NOTIFICATION_GAP_SECONDS) || 120) * 1000,
     desktopSyncPollMs:
@@ -135,4 +168,6 @@ module.exports = {
   parseBoolean,
   parseEnv,
   parseFileSizeLimitMb,
+  parseNonNegativeInteger,
+  parseOutgoingFileAccess,
 };

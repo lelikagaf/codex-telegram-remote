@@ -1219,10 +1219,14 @@ test("/access reports switchable cross-chat access", async () => {
     stateStore: createStateStore(),
     config: {
       allowedUserId: 7,
+      defaultCwd: "C:\\Project",
       desktopSyncPollMs: 1000,
       codexFullAccess: true,
       codexAppToolsEnabled: true,
       activeWriterMode: "fork",
+      telegramOutgoingFileAccess: "all",
+      telegramOutgoingMaxFileBytes: 0,
+      telegramOutgoingMaxFiles: 0,
     },
     logger: createLogger(),
   });
@@ -1232,6 +1236,9 @@ test("/access reports switchable cross-chat access", async () => {
   });
 
   assert.match(sent.at(-1).text, /Другие чаты Codex: доступны для поиска, чтения и отправки сообщений/);
+  assert.match(sent.at(-1).text, /Локальные файлы → Telegram: вся файловая система/);
+  assert.match(sent.at(-1).text, /Лимит исходящего файла: без ограничения/);
+  assert.match(sent.at(-1).text, /Файлов из одного ответа: без ограничения/);
   assert.match(sent.at(-1).text, /CODEX_APP_TOOLS_ENABLED=false/);
 });
 
@@ -1688,9 +1695,42 @@ test("collectOutgoingTelegramFiles recognizes Codex markdown and wrapped Windows
   );
 });
 
-test("Telegram final sends multiple referenced files as documents", async (t) => {
+test("collectOutgoingTelegramFiles all mode permits files and secrets outside workspace", (t) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "codex-telegram-all-"));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+
+  const workspace = path.join(directory, "workspace");
+  const external = path.join(directory, "external");
+  fs.mkdirSync(workspace);
+  fs.mkdirSync(external);
+  const archive = path.join(external, "result.zip");
+  const envFile = path.join(external, ".env");
+  fs.writeFileSync(archive, "archive");
+  fs.writeFileSync(envFile, "secret");
+
+  assert.deepEqual(
+    collectOutgoingTelegramFiles(`${archive}\n${envFile}`, {
+      access: "all",
+      roots: [workspace],
+      maxFileBytes: 0,
+      limitCount: 0,
+    }),
+    [archive, envFile].map((filePath) => path.resolve(filePath)),
+  );
+  assert.deepEqual(
+    collectOutgoingTelegramFiles(`${archive}\n${envFile}`, {
+      access: "off",
+      roots: [workspace],
+    }),
+    [],
+  );
+});
+
+test("Telegram final in all mode sends referenced files outside default workspace", async (t) => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "codex-telegram-final-files-"));
   t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const workspace = path.join(directory, "workspace");
+  fs.mkdirSync(workspace);
   const first = path.join(directory, "one.md");
   const second = path.join(directory, "two.md");
   fs.writeFileSync(first, "one");
@@ -1721,7 +1761,15 @@ test("Telegram final sends multiple referenced files as documents", async (t) =>
     telegram,
     codex,
     stateStore,
-    config: { allowedUserId: 7, defaultCwd: directory, desktopSyncPollMs: 1000, incomingMessageSettleMs: 1 },
+    config: {
+      allowedUserId: 7,
+      defaultCwd: workspace,
+      desktopSyncPollMs: 1000,
+      incomingMessageSettleMs: 1,
+      telegramOutgoingFileAccess: "all",
+      telegramOutgoingMaxFileBytes: 0,
+      telegramOutgoingMaxFiles: 0,
+    },
     logger: createLogger(),
   });
 

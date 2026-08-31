@@ -134,6 +134,9 @@ CODEX_ACTIVE_WRITER_MODE=queue
 TELEGRAM_NOTIFY_ON_START=true
 TELEGRAM_NOTIFY_AFTER_SLEEP=false
 TELEGRAM_MAX_FILE_SIZE_MB=0
+TELEGRAM_OUTGOING_FILE_ACCESS=workspace
+TELEGRAM_OUTGOING_MAX_FILE_SIZE_MB=50
+TELEGRAM_OUTGOING_MAX_FILES=10
 RESUME_NOTIFICATION_GAP_SECONDS=120
 DESKTOP_SYNC_POLL_SECONDS=3
 CODEX_WRITER_IDLE_SECONDS=90
@@ -160,6 +163,16 @@ LOG_LEVEL=info
 `TELEGRAM_MAX_FILE_SIZE_MB` задаёт максимальный размер загружаемого документа в
 мегабайтах. Значения `0` и `-1` отключают ограничение со стороны бота. При этом
 могут сохраняться собственные технические ограничения Telegram Bot API.
+`TELEGRAM_OUTGOING_FILE_ACCESS` управляет обратной отправкой файлов, на которые
+Codex сослался в финальном ответе: `off` отключает её, `workspace` разрешает
+только файлы внутри `CODEX_DEFAULT_CWD`, а `all` разрешает любой читаемый файл,
+доступный текущему пользователю Windows. В режиме `all` разрешены также файлы из
+рабочих каталогов других чатов и системных каталогов профиля, включая секретные
+файлы; включайте его только для личного бота с проверенным владельцем.
+`TELEGRAM_OUTGOING_MAX_FILE_SIZE_MB` и `TELEGRAM_OUTGOING_MAX_FILES` ограничивают
+размер одного исходящего файла и количество файлов из одного ответа. `0`
+отключает соответствующий лимит со стороны бота; ограничения Telegram и
+доступной памяти процесса сохраняются.
 `CODEX_WRITER_IDLE_SECONDS` задаёт, через сколько секунд простоя бот закрывает
 свой Codex app-server после write-действий, чтобы выбранный чат снова мог
 открываться в Codex Desktop без конфликта active writer.
@@ -222,6 +235,9 @@ powershell -ExecutionPolicy Bypass -File .\scripts\uninstall-autostart.ps1
   отправлять запрошенные владельцем сообщения в другие чаты через изолированный
   MCP-мост. Переключатель можно отключить независимо от полного системного
   доступа.
+- `TELEGRAM_OUTGOING_FILE_ACCESS=all` позволяет пересылать владельцу любой
+  локальный файл, упомянутый Codex в финальном ответе. Верните `workspace` или
+  `off`, чтобы снова ограничить или полностью отключить эту возможность.
 - Бот получает доступ к тем же файлам, что и вошедший пользователь Windows.
 - Не запускайте весь бот с постоянными правами администратора.
 - Не храните рабочий экземпляр на общедоступном сетевом диске.
