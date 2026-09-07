@@ -202,6 +202,18 @@ const RELEASE_HISTORY = [
       "Rebinding a Telegram topic removes the old reverse mapping; sync also repairs stale mappings from earlier versions.",
     ],
   },
+  {
+    id: "2026-09-07-expanded-regression-tests",
+    version: "0.1.19",
+    sequence: 19,
+    title: "Expanded regression coverage",
+    notes: [
+      "Added 62 tests for topics, persisted recovery, authorization, Telegram API errors and binary file delivery.",
+      "Topic chat-list buttons now highlight the chat selected in that topic.",
+      "Fractional topic sync limits are normalized to integers before calling Codex.",
+      "Added npm run test:coverage for repeatable coverage reports.",
+    ],
+  },
 ];
 
 const CURRENT_RELEASE = RELEASE_HISTORY.at(-1);

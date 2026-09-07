@@ -1071,18 +1071,19 @@ class CodexTelegramBot {
 
   async #showChats(target) {
     this.lastThreads = await this.#listThreadsWithCurrent(target, 10);
+    const currentThreadId = this.#threadIdForTarget(target);
     this.state = this.stateStore.save({
       lastListedThreadIds: this.lastThreads.map((thread) => thread.id),
     });
     const keyboard = this.lastThreads.map((thread, index) => [
       {
-        text: `${thread.id === this.state.currentThreadId ? "●" : "○"} ${index + 1}. ${threadTitle(thread).slice(0, 45)}`,
+        text: `${thread.id === currentThreadId ? "●" : "○"} ${index + 1}. ${threadTitle(thread).slice(0, 45)}`,
         callback_data: `use:${thread.id}`,
       },
     ]);
     await this.telegram.sendMessage(
       target,
-      formatThreadList(this.lastThreads, this.#threadIdForTarget(target)),
+      formatThreadList(this.lastThreads, currentThreadId),
       keyboard.length ? { reply_markup: { inline_keyboard: keyboard } } : {},
     );
   }
@@ -1255,7 +1256,7 @@ class CodexTelegramBot {
       await this.telegram.sendMessage(target, "Telegram-клиент не поддерживает создание тем.");
       return;
     }
-    const limit = Math.min(50, Math.max(1, Number(argument) || 10));
+    const limit = Math.min(50, Math.max(1, Math.floor(Number(argument) || 10)));
     const threads = await this.#listThreadsWithCurrent(target, limit);
     this.lastThreads = threads;
     this.state = this.stateStore.save({

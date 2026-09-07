@@ -174,9 +174,14 @@ LOG_LEVEL=info
 
 ```powershell
 npm.cmd test
+npm.cmd run test:coverage
 npm.cmd run check
 npm.cmd run diagnose
 ```
+
+`test:coverage` запускает тесты и показывает покрытие строк, ветвей и функций.
+Тесты используют подменённые Telegram/Codex API и временные файлы; рабочий бот
+и его состояние не затрагиваются.
 
 `diagnose` проверяет поиск `codex.exe`, запускает локальный app-server и читает
 список чатов без подключения к Telegram.
