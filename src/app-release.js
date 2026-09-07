@@ -191,6 +191,17 @@ const RELEASE_HISTORY = [
       "Desktop answer polling no longer repeats warnings for freshly created chats without history.",
     ],
   },
+  {
+    id: "2026-09-07-current-thread-topic-sync",
+    version: "0.1.18",
+    sequence: 18,
+    title: "Reliable topic synchronization",
+    notes: [
+      "Topic synchronization includes the selected chat even before Codex lists its history.",
+      "The requested topic sync limit is preserved when adding the selected chat.",
+      "Rebinding a Telegram topic removes the old reverse mapping; sync also repairs stale mappings from earlier versions.",
+    ],
+  },
 ];
 
 const CURRENT_RELEASE = RELEASE_HISTORY.at(-1);

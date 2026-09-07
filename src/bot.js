@@ -729,6 +729,14 @@ class CodexTelegramBot {
     if (!chatId || !messageThreadId || !thread?.id) return;
     const topicKey = this.#topicKey(chatId, messageThreadId);
     const threadTopicKey = this.#threadTopicKey(chatId, thread.id);
+    const telegramThreadTopics = { ...(this.state.telegramThreadTopics || {}) };
+    const previous = this.state.telegramTopicThreads?.[topicKey];
+    if (previous?.threadId && previous.threadId !== thread.id) {
+      const previousKey = this.#threadTopicKey(chatId, previous.threadId);
+      if (telegramThreadTopics[previousKey]?.messageThreadId === messageThreadId) {
+        delete telegramThreadTopics[previousKey];
+      }
+    }
     this.state = this.stateStore.save({
       telegramTopicThreads: {
         ...(this.state.telegramTopicThreads || {}),
@@ -740,7 +748,7 @@ class CodexTelegramBot {
         },
       },
       telegramThreadTopics: {
-        ...(this.state.telegramThreadTopics || {}),
+        ...telegramThreadTopics,
         [threadTopicKey]: {
           chatId,
           messageThreadId,
@@ -1062,9 +1070,7 @@ class CodexTelegramBot {
   }
 
   async #showChats(target) {
-    const result = await this.codex.listThreads({ limit: 10 });
-    this.lastThreads = result.data || [];
-    await this.#includeCurrentThreadInLastThreads(target);
+    this.lastThreads = await this.#listThreadsWithCurrent(target, 10);
     this.state = this.stateStore.save({
       lastListedThreadIds: this.lastThreads.map((thread) => thread.id),
     });
@@ -1081,18 +1087,27 @@ class CodexTelegramBot {
     );
   }
 
-  async #includeCurrentThreadInLastThreads(target) {
+  async #listThreadsWithCurrent(target, limit) {
+    const result = await this.codex.listThreads({ limit });
+    const threads = result.data || [];
     const currentThreadId = this.#threadIdForTarget(target);
-    if (!currentThreadId) return;
-    if (this.lastThreads.some((thread) => thread.id === currentThreadId)) return;
+    if (!currentThreadId || threads.some((thread) => thread.id === currentThreadId)) return threads;
     try {
       const current = (await this.codex.readThread(currentThreadId, false)).thread;
-      this.lastThreads = [current, ...this.lastThreads].slice(0, 10);
+      return [current, ...threads].slice(0, limit);
     } catch (error) {
+      if (isUnmaterializedThreadError(error)) {
+        return [{
+          id: currentThreadId,
+          name: this.#threadNameForTarget(target),
+          cwd: this.config.defaultCwd,
+        }, ...threads].slice(0, limit);
+      }
       this.logger.warn("Не удалось добавить выбранный чат в список", {
         threadId: currentThreadId,
         message: error.message,
       });
+      return threads;
     }
   }
 
@@ -1241,8 +1256,7 @@ class CodexTelegramBot {
       return;
     }
     const limit = Math.min(50, Math.max(1, Number(argument) || 10));
-    const result = await this.codex.listThreads({ limit });
-    const threads = result.data || [];
+    const threads = await this.#listThreadsWithCurrent(target, limit);
     this.lastThreads = threads;
     this.state = this.stateStore.save({
       lastListedThreadIds: threads.map((thread) => thread.id),
@@ -1254,7 +1268,10 @@ class CodexTelegramBot {
       const existing = this.state.telegramThreadTopics?.[
         this.#threadTopicKey(target.chatId, thread.id)
       ];
-      if (existing?.messageThreadId) {
+      const mapped = existing?.messageThreadId && this.state.telegramTopicThreads?.[
+        this.#topicKey(target.chatId, existing.messageThreadId)
+      ];
+      if (mapped?.threadId === thread.id) {
         reused.push(threadTitle(thread));
         continue;
       }
