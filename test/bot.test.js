@@ -478,6 +478,50 @@ test("анонимный админ не запускает команды и н
   assert.deepEqual(sent, []);
 });
 
+test("/chats показывает выбранный свежий чат, даже если thread/list его не вернул", async () => {
+  const sent = [];
+  const telegram = new EventEmitter();
+  telegram.sendMessage = async (chatId, text, extra) => {
+    sent.push({ chatId, text, extra });
+    return { message_id: sent.length };
+  };
+
+  const codex = new EventEmitter();
+  codex.listThreads = async () => ({
+    data: [
+      { id: "old-1", name: "Bridge8 #2", cwd: "C:\\Users\\lelik\\Documents\\Codex" },
+      { id: "old-2", name: "Сравнить токены SOL и Astra", cwd: "C:\\Project" },
+    ],
+  });
+  codex.readThread = async (threadId) => ({
+    thread: {
+      id: threadId,
+      name: "Bridge8 UI/UX",
+      cwd: "C:\\Users\\lelik\\Documents\\Codex",
+      status: { type: "idle" },
+    },
+  });
+
+  const stateStore = createStateStore({
+    currentThreadId: "new-thread",
+    currentThreadName: "Bridge8 UI/UX",
+  });
+  const bot = new CodexTelegramBot({
+    telegram,
+    codex,
+    stateStore,
+    config: { allowedUserId: 7, desktopSyncPollMs: 1000 },
+    logger: createLogger(),
+  });
+
+  await bot.handleUpdate({
+    message: { from: { id: 7 }, chat: { id: 100 }, text: "/chats" },
+  });
+
+  assert.match(sent.at(-1).text, /● 1\. Bridge8 UI\/UX/);
+  assert.equal(stateStore.state.lastListedThreadIds[0], "new-thread");
+});
+
 test("вопрос Codex можно полностью обработать через /answer", async () => {
   const sent = [];
   const responses = [];
@@ -1022,6 +1066,12 @@ test("распознаётся ошибка ещё не материализов
   assert.equal(
     isUnmaterializedThreadError(
       new Error("thread/turns/list is unavailable before first user message"),
+    ),
+    true,
+  );
+  assert.equal(
+    isUnmaterializedThreadError(
+      new Error("invalid paginated history lineage for thread-new: missing source rollout"),
     ),
     true,
   );

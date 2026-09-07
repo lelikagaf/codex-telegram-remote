@@ -180,6 +180,17 @@ const RELEASE_HISTORY = [
       "This restores shell, SSH, skills, and other code-mode tools after an incomplete Codex cleanup leaves duplicate binaries.",
     ],
   },
+  {
+    id: "2026-09-07-new-thread-visibility",
+    version: "0.1.17",
+    sequence: 17,
+    title: "New thread visibility",
+    notes: [
+      "A newly created Telegram-selected Codex chat is kept at the top of /chats even before thread/list returns it.",
+      "Empty new chats with unavailable turn history are treated as an empty sync baseline.",
+      "Desktop answer polling no longer repeats warnings for freshly created chats without history.",
+    ],
+  },
 ];
 
 const CURRENT_RELEASE = RELEASE_HISTORY.at(-1);

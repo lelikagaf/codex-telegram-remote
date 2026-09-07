@@ -93,8 +93,10 @@ function isThreadBusy(thread) {
 }
 
 function isUnmaterializedThreadError(error) {
-  return String(error?.message || error || "").includes(
-    "thread/turns/list is unavailable before first user message",
+  const message = String(error?.message || error || "");
+  return (
+    message.includes("thread/turns/list is unavailable before first user message") ||
+    /invalid paginated history lineage/i.test(message)
   );
 }
 
@@ -1062,6 +1064,7 @@ class CodexTelegramBot {
   async #showChats(target) {
     const result = await this.codex.listThreads({ limit: 10 });
     this.lastThreads = result.data || [];
+    await this.#includeCurrentThreadInLastThreads(target);
     this.state = this.stateStore.save({
       lastListedThreadIds: this.lastThreads.map((thread) => thread.id),
     });
@@ -1076,6 +1079,21 @@ class CodexTelegramBot {
       formatThreadList(this.lastThreads, this.#threadIdForTarget(target)),
       keyboard.length ? { reply_markup: { inline_keyboard: keyboard } } : {},
     );
+  }
+
+  async #includeCurrentThreadInLastThreads(target) {
+    const currentThreadId = this.#threadIdForTarget(target);
+    if (!currentThreadId) return;
+    if (this.lastThreads.some((thread) => thread.id === currentThreadId)) return;
+    try {
+      const current = (await this.codex.readThread(currentThreadId, false)).thread;
+      this.lastThreads = [current, ...this.lastThreads].slice(0, 10);
+    } catch (error) {
+      this.logger.warn("Не удалось добавить выбранный чат в список", {
+        threadId: currentThreadId,
+        message: error.message,
+      });
+    }
   }
 
   async #showCurrent(target) {
@@ -1148,6 +1166,10 @@ class CodexTelegramBot {
     this.#markThreadUnmaterialized(thread.id, true);
     this.runtimeNewThreadIds.add(thread.id);
     if (target.messageThreadId) this.#saveTopicMapping(target.chatId, target.messageThreadId, thread);
+    this.lastThreads = [
+      thread,
+      ...this.lastThreads.filter((item) => item.id !== thread.id),
+    ].slice(0, 10);
     this.desktopSyncSuspended = true;
     this.state = this.stateStore.save({
       currentThreadId: thread.id,
@@ -1338,6 +1360,15 @@ class CodexTelegramBot {
         desktopSyncSentUserTurnIds: [],
       });
       this.desktopTurnFirstCompletedAt.clear();
+    } catch (error) {
+      if (!isUnmaterializedThreadError(error)) throw error;
+      this.state = this.stateStore.save({
+        desktopSyncThreadId: threadId,
+        desktopSyncSeenTurnIds: [],
+        desktopSyncSentUserMessageIds: [],
+        desktopSyncSentUserTurnIds: [],
+      });
+      this.desktopTurnFirstCompletedAt.clear();
     } finally {
       this.desktopSyncSuspended = false;
     }
@@ -1475,7 +1506,14 @@ class CodexTelegramBot {
         return;
       }
 
-      const result = await this.codex.listTurns(threadId, { limit: 50, itemsView: "full" });
+      let result;
+      try {
+        result = await this.codex.listTurns(threadId, { limit: 50, itemsView: "full" });
+      } catch (error) {
+        if (!isUnmaterializedThreadError(error)) throw error;
+        await this.#resetDesktopSyncBaseline(threadId);
+        return;
+      }
       const seenIds = new Set(this.state.desktopSyncSeenTurnIds);
       const sentUserMessageIds = new Set(this.state.desktopSyncSentUserMessageIds || []);
       const legacySentUserTurnIds = new Set(this.state.desktopSyncSentUserTurnIds || []);
