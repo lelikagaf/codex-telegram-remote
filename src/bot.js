@@ -435,7 +435,11 @@ function formatModelSettings(settings, models) {
   const selectedOption = options.find((option) => option.value === effectiveEffort);
   const inherited = !settings?.reasoningEffort && effectiveEffort ? " (по умолчанию)" : "";
   const lines = [
-    "Текущая конфигурация выбранного чата:",
+    settings?.pending
+      ? "Настройки сохранены для первого сообщения:"
+      : settings?.source === "config"
+        ? "Настройки для следующего запуска из конфигурации Codex:"
+        : "Текущая конфигурация выбранного чата:",
     `Модель: ${modelName}${modelSlug}`,
     `Усилие: ${effectiveEffort || "не определено"}${inherited}${effectiveEffort ? ` — ${reasoningEffortDescription(effectiveEffort, selectedOption?.description)}` : ""}`,
   ];
@@ -875,11 +879,9 @@ class CodexTelegramBot {
             target,
             [
               `❌ Не удалось прочитать или изменить настройки модели: ${error.message}`,
-              "Если чат занят в Codex Desktop, дождись завершения задачи и повтори команду.",
+              "Повторите команду после устранения указанной ошибки.",
             ].join("\n"),
           );
-        } finally {
-          await this.#releaseThreadIfIdle(this.state.currentThreadId);
         }
         break;
       case "/access":
@@ -1239,6 +1241,12 @@ class CodexTelegramBot {
       desktopSyncSentUserMessageIds: [],
       desktopSyncSentUserTurnIds: [],
     };
+    const pendingModel = this.state.pendingThreadModelSettings?.[oldThreadId];
+    if (pendingModel) {
+      patch.pendingThreadModelSettings = { ...this.state.pendingThreadModelSettings };
+      delete patch.pendingThreadModelSettings[oldThreadId];
+      patch.pendingThreadModelSettings[thread.id] = pendingModel;
+    }
     if (this.state.currentThreadId === oldThreadId || !target.messageThreadId) {
       patch.currentThreadId = thread.id;
       patch.currentThreadName = threadTitle(thread);
@@ -1633,6 +1641,12 @@ class CodexTelegramBot {
 
   async #showOrSetModel(chatId, argument) {
     const target = typeof chatId === "object" ? chatId : { chatId, messageThreadId: null };
+    const tokens = String(argument || "").trim().split(/\s+/).filter(Boolean);
+    if (tokens.length === 1 && tokens[0].toLowerCase() === "list") {
+      const modelResult = await this.codex.listModels({ includeHidden: true });
+      await this.telegram.sendLongMessage(target, formatModelList(modelResult.data || []));
+      return;
+    }
     const threadId = this.#threadIdForTarget(target);
     if (!threadId) {
       await this.telegram.sendMessage(target, "Сначала выбери чат командой /chats.");
@@ -1642,13 +1656,11 @@ class CodexTelegramBot {
     let settings;
     let modelResult;
     try {
-      [settings, modelResult] = await this.#withWriterLease(
-        () => Promise.all([
-          this.codex.getThreadModelSettings(threadId),
-          this.codex.listModels({ includeHidden: true }),
-        ]),
-        "model-settings",
-      );
+      const pending = this.state.pendingThreadModelSettings?.[threadId];
+      [settings, modelResult] = await Promise.all([
+        pending ? { ...pending, pending: true } : this.codex.getThreadModelSettings(threadId),
+        this.codex.listModels({ includeHidden: true }),
+      ]);
     } catch (error) {
       if (isActiveWriterError(error)) {
         await this.telegram.sendMessage(
@@ -1660,14 +1672,9 @@ class CodexTelegramBot {
       throw error;
     }
     const models = modelResult.data || [];
-    const tokens = String(argument || "").trim().split(/\s+/).filter(Boolean);
 
     if (!tokens.length || tokens[0].toLowerCase() === "status") {
       await this.telegram.sendLongMessage(target, formatModelSettings(settings, models));
-      return;
-    }
-    if (tokens.length === 1 && tokens[0].toLowerCase() === "list") {
-      await this.telegram.sendLongMessage(target, formatModelList(models));
       return;
     }
     if (tokens.length > 2) {
@@ -1721,23 +1728,43 @@ class CodexTelegramBot {
     }
 
     let updated;
+    const changes = {
+      ...(requestedModel ? { model: requestedModel } : {}),
+      ...(requestedEffort ? { reasoningEffort: requestedEffort } : {}),
+    };
+    const savePending = () => {
+      const saved = {
+        model: changes.model ?? settings.model,
+        reasoningEffort: changes.reasoningEffort ?? settings.reasoningEffort,
+      };
+      this.state = this.stateStore.save({
+        pendingThreadModelSettings: { ...this.state.pendingThreadModelSettings, [threadId]: saved },
+      });
+      return { ...saved, pending: true };
+    };
     try {
-      updated = await this.#withWriterLease(
-        () => this.codex.updateThreadModelSettings(threadId, {
-          ...(requestedModel ? { model: requestedModel } : {}),
-          ...(requestedEffort ? { reasoningEffort: requestedEffort } : {}),
-        }),
-        "model-settings",
-      );
+      updated = this.unmaterializedThreadIds.has(threadId) || settings.pending
+        ? savePending()
+        : await this.#withWriterLease(
+          () => this.codex.updateThreadModelSettings(threadId, changes),
+          "model-settings",
+        );
     } catch (error) {
-      if (isActiveWriterError(error)) {
+      if (isMissingRolloutError(error) || isUnmaterializedThreadError(error)) {
+        updated = savePending();
+      } else if (isActiveWriterError(error)) {
         await this.telegram.sendMessage(
           target,
           "⏳ Этот чат сейчас открыт или занят в приложении Codex. Настройки модели можно менять, когда Desktop отпустит чат.",
         );
         return;
+      } else {
+        throw error;
       }
-      throw error;
+    } finally {
+      if (!this.unmaterializedThreadIds.has(threadId) && !updated?.pending) {
+        await this.#releaseThreadIfIdle(threadId);
+      }
     }
     await this.telegram.sendLongMessage(
       chatId,
@@ -1943,8 +1970,15 @@ class CodexTelegramBot {
     this.activeByThread.set(threadId, context);
 
     try {
+      const pendingModel = this.state.pendingThreadModelSettings?.[threadId];
+      if (pendingModel) await this.codex.updateThreadModelSettings(threadId, pendingModel);
       const result = await this.codex.startTurn(threadId, text);
       if (isUnmaterialized) this.#markThreadUnmaterialized(threadId, false);
+      if (pendingModel) {
+        const remaining = { ...this.state.pendingThreadModelSettings };
+        delete remaining[threadId];
+        this.state = this.stateStore.save({ pendingThreadModelSettings: remaining });
+      }
       context.turnId = result.turn.id;
       this.#rememberTurn(context.turnId, true, {
         threadId,

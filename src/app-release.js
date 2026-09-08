@@ -214,6 +214,18 @@ const RELEASE_HISTORY = [
       "Added npm run test:coverage for repeatable coverage reports.",
     ],
   },
+  {
+    id: "2026-09-08-new-chat-model-settings",
+    version: "0.1.20",
+    sequence: 20,
+    title: "Model settings before the first message",
+    notes: [
+      "Viewing /model reads thread metadata or effective configuration without resuming the chat or releasing its writer.",
+      "Model choices for empty chats survive restarts and are applied before the first message, with retry on failure.",
+      "/model list no longer requires a selected or loaded chat.",
+      "Added lifecycle regression tests across bot commands, CodexClient and persisted state.",
+    ],
+  },
 ];
 
 const CURRENT_RELEASE = RELEASE_HISTORY.at(-1);

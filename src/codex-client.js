@@ -393,12 +393,27 @@ class CodexClient extends EventEmitter {
   }
 
   async getThreadModelSettings(threadId) {
-    const settings = await this.resumeThread(threadId);
-    if (!settings) throw new Error("Codex не вернул настройки модели выбранного чата.");
-    return { ...settings };
+    const cached = this.loadedThreads.has(threadId) && this.threadModelSettings.get(threadId);
+    if (cached?.model) return { ...cached };
+    const { thread } = await this.readThread(threadId, false);
+    if (thread.model) {
+      return { model: thread.model, reasoningEffort: thread.reasoningEffort ?? null };
+    }
+    const { config } = await this.request("config/read", {
+      includeLayers: false,
+      cwd: thread.cwd || this.cwd,
+    });
+    let model = config.model;
+    if (!model) {
+      const catalog = await this.listModels();
+      model = catalog.data?.find((item) => item.isDefault)?.model;
+    }
+    if (!model) throw new Error("Codex не вернул модель выбранного чата или модель по умолчанию.");
+    return { model, reasoningEffort: config.model_reasoning_effort ?? null, source: "config" };
   }
 
   async updateThreadModelSettings(threadId, { model, reasoningEffort } = {}) {
+    await this.resumeThread(threadId);
     const current = await this.getThreadModelSettings(threadId);
     const params = { threadId };
     if (model !== undefined) params.model = model;
