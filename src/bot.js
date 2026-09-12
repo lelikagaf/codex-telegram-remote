@@ -1,5 +1,6 @@
 const fs = require("node:fs");
 const path = require("node:path");
+const { randomUUID } = require("node:crypto");
 const { formatThread, formatThreadList, threadTitle } = require("./format");
 const { redact } = require("./logger");
 const { TelegramFileTooLargeError } = require("./telegram-client");
@@ -562,6 +563,7 @@ class CodexTelegramBot {
     this.pendingPromptQueues = new Map();
     this.drainingPromptThreads = new Set();
     this.busyQueueNotices = new Set();
+    this.writerDecisionInFlight = new Set();
     this.unmaterializedThreadIds = new Set(this.state.unmaterializedThreadIds || []);
     this.runtimeNewThreadIds = new Set();
 
@@ -589,6 +591,9 @@ class CodexTelegramBot {
       access: this.config.telegramOutgoingFileAccess || "workspace",
       maxFileBytes: this.config.telegramOutgoingMaxFileBytes,
       maxFiles: this.config.telegramOutgoingMaxFiles,
+    });
+    this.logger.info("Политика конфликта writer Codex", {
+      mode: this.config.activeWriterMode || "queue",
     });
     await this.telegram.deleteWebhook();
     await this.telegram.setMyCommands([
@@ -652,6 +657,7 @@ class CodexTelegramBot {
     }
     this.documentBatches.clear();
     this.busyQueueNotices.clear();
+    this.writerDecisionInFlight.clear();
   }
 
   #busyQueueNoticeKey(threadId, chatId, text) {
@@ -664,6 +670,141 @@ class CodexTelegramBot {
     if (this.busyQueueNotices.has(key)) return;
     this.busyQueueNotices.add(key);
     await this.telegram.sendMessage(chatId, message);
+  }
+
+  #writerDecisionForTarget(threadId, target) {
+    return (this.state.pendingWriterDecisions || []).find(
+      (item) =>
+        item?.threadId === threadId &&
+        Number(item.chatId) === Number(target.chatId) &&
+        Number(item.messageThreadId || 0) === Number(target.messageThreadId || 0),
+    );
+  }
+
+  #removeWriterDecision(decisionId) {
+    this.state = this.stateStore.save({
+      pendingWriterDecisions: (this.state.pendingWriterDecisions || []).filter(
+        (item) => item?.id !== decisionId,
+      ),
+    });
+  }
+
+  async #requestWriterDecision(threadId, target, text) {
+    const existing = this.#writerDecisionForTarget(threadId, target);
+    if (existing) {
+      await this.telegram.sendMessage(
+        target,
+        "🔒 Этот чат всё ещё заблокирован. Сначала выберите действие в предыдущем сообщении. Новое сообщение не отправлено в Codex.",
+      );
+      this.#scheduleWriterRelease("writer-decision-pending");
+      return false;
+    }
+
+    const id = randomUUID().replace(/-/g, "").slice(0, 16);
+    const prompt = [
+      "🔒 Этот чат сейчас открыт или занят в приложении Codex.",
+      "Полученное сообщение не передано в Codex. Что сделать?",
+    ].join("\n");
+    const message = await this.telegram.sendMessage(target, prompt, {
+      reply_markup: {
+        inline_keyboard: [[
+          { text: "🔀 Создать копию и продолжить", callback_data: `writer:fork:${id}` },
+          { text: "🚫 Ничего не делать", callback_data: `writer:cancel:${id}` },
+        ]],
+      },
+    });
+    this.state = this.stateStore.save({
+      pendingWriterDecisions: [
+        ...(this.state.pendingWriterDecisions || []),
+        {
+          id,
+          threadId,
+          chatId: target.chatId,
+          messageThreadId: target.messageThreadId || null,
+          text,
+          promptMessageId: message.message_id,
+          createdAt: new Date().toISOString(),
+        },
+      ].slice(-50),
+    });
+    this.logger.info("Запрошено решение для заблокированного чата", {
+      decisionId: id,
+      threadId,
+      chatId: target.chatId,
+      messageThreadId: target.messageThreadId || null,
+    });
+    this.#scheduleWriterRelease("writer-decision-requested");
+    return false;
+  }
+
+  async #handleWriterDecisionCallback(query, target, data) {
+    const match = /^writer:(fork|cancel):([a-f0-9]{16})$/.exec(data);
+    if (!match) return false;
+    const [, action, decisionId] = match;
+    const decision = (this.state.pendingWriterDecisions || []).find(
+      (item) => item?.id === decisionId,
+    );
+    if (
+      !decision ||
+      Number(decision.chatId) !== Number(target.chatId) ||
+      Number(decision.messageThreadId || 0) !== Number(target.messageThreadId || 0)
+    ) {
+      await this.telegram.answerCallbackQuery(query.id, "Решение уже неактуально");
+      return true;
+    }
+    if (this.writerDecisionInFlight.has(decisionId)) {
+      await this.telegram.answerCallbackQuery(query.id, "Действие уже выполняется");
+      return true;
+    }
+
+    if (action === "cancel") {
+      this.#removeWriterDecision(decisionId);
+      this.logger.info("Сообщение заблокированного чата отменено владельцем", {
+        decisionId,
+        threadId: decision.threadId,
+      });
+      await this.telegram.answerCallbackQuery(query.id, "Сообщение отменено");
+      await this.telegram.editMessage(
+        target,
+        decision.promptMessageId,
+        "🚫 Ничего не делаю. Сообщение не передано в Codex, диалог не продолжен.",
+        { reply_markup: { inline_keyboard: [] } },
+      );
+      this.#scheduleWriterRelease("writer-decision-cancelled");
+      return true;
+    }
+
+    this.writerDecisionInFlight.add(decisionId);
+    await this.telegram.answerCallbackQuery(query.id, "Создаю копию чата…");
+    try {
+      const forkThreadId = await this.#forkThreadForTelegram(target, decision.threadId);
+      this.#removeWriterDecision(decisionId);
+      await this.telegram.editMessage(
+        target,
+        decision.promptMessageId,
+        "🔀 Выбрано: создать копию. Копия создана, запускаю сохранённое сообщение.",
+        { reply_markup: { inline_keyboard: [] } },
+      );
+      await this.#sendPrompt(target, decision.text, { writerDecisionResolved: true });
+      this.logger.info("Решение о заблокированном чате выполнено", {
+        sourceThreadId: decision.threadId,
+        forkThreadId,
+        action: "fork",
+      });
+    } catch (error) {
+      this.logger.warn("Не удалось выполнить решение о создании копии чата", {
+        threadId: decision.threadId,
+        message: error.message,
+      });
+      await this.telegram.sendMessage(
+        target,
+        `❌ Не удалось создать копию: ${error.message}\nРешение сохранено — кнопку можно нажать повторно.`,
+      );
+    } finally {
+      this.writerDecisionInFlight.delete(decisionId);
+      this.#scheduleWriterRelease("writer-decision-finished");
+    }
+    return true;
   }
 
   #cancelWriterRelease() {
@@ -1097,6 +1238,7 @@ class CodexTelegramBot {
     }
 
     const data = String(query.data || "");
+    if (await this.#handleWriterDecisionCallback(query, target, data)) return;
     if (data.startsWith("use:")) {
       const threadId = data.slice(4);
       await this.#selectThread(target, threadId);
@@ -1831,11 +1973,15 @@ class CodexTelegramBot {
     const approvals = [...this.pendingApprovals.values()].filter(
       (item) => !threadId || (item.params.threadId || item.params.conversationId) === threadId,
     );
+    const writerDecisions = (this.state.pendingWriterDecisions || []).filter(
+      (item) => !threadId || item.threadId === threadId,
+    );
     const lines = [
       `Codex app-server: ${this.codex.isRunning ? "работает" : "остановлен"}`,
       `Текущий чат: ${this.#threadNameForTarget(target) || "не выбран"}`,
       `Задача: ${active ? "выполняется" : "нет активной"}`,
       `Ожидает взаимодействия: ${approvals.length}`,
+      `Ожидает решения по блокировке: ${writerDecisions.length}`,
       `Полный доступ: ${this.config.codexFullAccess ? "включён" : "выключен"}`,
       `Доступ к другим чатам: ${this.config.codexAppToolsEnabled ? "включён" : "выключен"}`,
       `Отправка локальных файлов: ${this.config.telegramOutgoingFileAccess || "workspace"}`,
@@ -1850,6 +1996,12 @@ class CodexTelegramBot {
     const fullAccess = Boolean(this.config.codexFullAccess);
     const appToolsEnabled = Boolean(this.config.codexAppToolsEnabled);
     const outgoingFileAccess = this.config.telegramOutgoingFileAccess || "workspace";
+    const writerMode = this.config.activeWriterMode || "queue";
+    const writerModeDescription = writerMode === "ask"
+      ? "спросить: создать копию или отменить сообщение"
+      : writerMode === "fork"
+        ? "автоматически создать копию"
+        : "ждать освобождения исходного чата";
     await this.telegram.sendMessage(
       chatId,
       [
@@ -1860,7 +2012,7 @@ class CodexTelegramBot {
         `Локальные файлы → Telegram: ${outgoingFileAccess === "all" ? "вся файловая система текущего пользователя" : outgoingFileAccess === "off" ? "отключено" : `только ${this.config.defaultCwd}`}`,
         `Лимит исходящего файла: ${formatFileSizeLimit(this.config.telegramOutgoingMaxFileBytes)}`,
         `Файлов из одного ответа: ${this.config.telegramOutgoingMaxFiles > 0 ? this.config.telegramOutgoingMaxFiles : "без ограничения"}`,
-        `Конфликт writer с Desktop: ${this.config.activeWriterMode || "queue"}`,
+        `Конфликт writer с Desktop: ${writerMode} — ${writerModeDescription}`,
         "Область: каждый новый ход через Telegram, во всех старых и новых чатах.",
         "Computer Use и плагины наследуются от Codex; отдельные системные ограничения Windows и приложений сохраняются.",
         "Отключение доступа к другим чатам: CODEX_APP_TOOLS_ENABLED=false; файлов: TELEGRAM_OUTGOING_FILE_ACCESS=off. Затем перезапустить задачу.",
@@ -1909,6 +2061,16 @@ class CodexTelegramBot {
       await this.telegram.sendMessage(target, "Сначала выбери чат командой /chats.");
       return false;
     }
+    if (
+      !options.writerDecisionResolved &&
+      this.#writerDecisionForTarget(threadId, target)
+    ) {
+      await this.telegram.sendMessage(
+        target,
+        "🔒 Сначала выберите, что делать с предыдущим сообщением. Новое сообщение не отправлено в Codex.",
+      );
+      return false;
+    }
     if (this.activeByThread.has(threadId)) {
       if (options.queueWhenBusy) return this.#queuePrompt(threadId, target, text, { silent: true });
       await this.telegram.sendMessage(
@@ -1945,6 +2107,9 @@ class CodexTelegramBot {
       }
     }
     if (!isUnmaterialized && (isThreadBusy(current.thread) || hasActiveTurn(recentTurns.data))) {
+      if (this.config.activeWriterMode === "ask") {
+        return this.#requestWriterDecision(threadId, target, text);
+      }
       if (options.queueWhenBusy) {
         await this.#notifyQueuedBusyOnce(
           threadId,
@@ -1973,7 +2138,9 @@ class CodexTelegramBot {
         threadId = await this.#recreateUnmaterializedThread(target, threadId);
         isUnmaterialized = true;
       } else if (isActiveWriterError(error)) {
-        if (this.config.activeWriterMode === "fork") {
+        if (this.config.activeWriterMode === "ask") {
+          return this.#requestWriterDecision(threadId, target, text);
+        } else if (this.config.activeWriterMode === "fork") {
           try {
             threadId = await this.#forkThreadForTelegram(target, threadId);
           } catch (forkError) {

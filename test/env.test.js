@@ -33,9 +33,10 @@ test("parseApprovalPolicy отклоняет неизвестный режим",
   assert.throws(() => parseApprovalPolicy("always"), /CODEX_APPROVAL_POLICY/);
 });
 
-test("parseActiveWriterMode принимает очередь и fork", () => {
+test("parseActiveWriterMode принимает queue, fork и ask", () => {
   assert.equal(parseActiveWriterMode(undefined), "queue");
   assert.equal(parseActiveWriterMode("FORK"), "fork");
+  assert.equal(parseActiveWriterMode("ask"), "ask");
   assert.throws(() => parseActiveWriterMode("takeover"), /CODEX_ACTIVE_WRITER_MODE/);
 });
 

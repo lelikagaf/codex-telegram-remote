@@ -51,8 +51,8 @@ function parseApprovalPolicy(value) {
 
 function parseActiveWriterMode(value) {
   const mode = String(value || "queue").trim().toLowerCase();
-  if (["queue", "fork"].includes(mode)) return mode;
-  const error = new Error("CODEX_ACTIVE_WRITER_MODE должен быть queue или fork.");
+  if (["queue", "fork", "ask"].includes(mode)) return mode;
+  const error = new Error("CODEX_ACTIVE_WRITER_MODE должен быть queue, fork или ask.");
   error.exitCode = 78;
   throw error;
 }

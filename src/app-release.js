@@ -238,6 +238,17 @@ const RELEASE_HISTORY = [
       "/access and /status now expose the effective outgoing file access mode.",
     ],
   },
+  {
+    id: "2026-09-12-confirm-chat-fork",
+    version: "0.1.22",
+    sequence: 22,
+    title: "Confirm forks for blocked chats",
+    notes: [
+      "Added CODEX_ACTIVE_WRITER_MODE=ask for explicit Telegram confirmation when a chat is blocked by Desktop.",
+      "The owner can create a copy and run the saved message or cancel it without continuing the Codex dialogue.",
+      "Pending decisions survive bot restarts and duplicate messages do not bypass the confirmation.",
+    ],
+  },
 ];
 
 const CURRENT_RELEASE = RELEASE_HISTORY.at(-1);

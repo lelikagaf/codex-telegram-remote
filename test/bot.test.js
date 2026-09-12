@@ -52,6 +52,7 @@ function createStateStore(overrides = {}) {
       telegramTopicThreads: {},
       telegramThreadTopics: {},
       unmaterializedThreadIds: [],
+      pendingWriterDecisions: [],
       ...overrides,
     },
     save(patch) {
@@ -779,6 +780,144 @@ test("режим fork продолжает занятый Desktop-чат и за
   assert.deepEqual(started, [{ threadId: "thread-fork", text: "Продолжай удалённо" }]);
   assert.equal(stateStore.state.currentThreadId, "thread-fork");
   assert.equal(sent.some((item) => /Создано продолжение/.test(item.text)), true);
+});
+
+test("режим ask при блокировке ждёт решения и отменяет сообщение без продолжения", async () => {
+  const sent = [];
+  const edits = [];
+  const callbacks = [];
+  let forkCalls = 0;
+  let startCalls = 0;
+  const telegram = new EventEmitter();
+  telegram.sendMessage = async (chatId, text, extra = {}) => {
+    sent.push({ chatId, text, extra });
+    return { message_id: sent.length };
+  };
+  telegram.editMessage = async (chatId, messageId, text, extra = {}) => {
+    edits.push({ chatId, messageId, text, extra });
+  };
+  telegram.answerCallbackQuery = async (id, text) => callbacks.push({ id, text });
+
+  const codex = new EventEmitter();
+  codex.resumeThread = async () => {
+    throw new Error("thread thread-1 already has an active writer");
+  };
+  codex.readThread = async () => ({ thread: { status: { type: "idle" }, turns: [] } });
+  codex.listTurns = async () => ({ data: [] });
+  codex.forkThread = async () => {
+    forkCalls += 1;
+    return { thread: { id: "thread-fork" } };
+  };
+  codex.startTurn = async () => {
+    startCalls += 1;
+    return { turn: { id: "turn-ask" } };
+  };
+
+  const stateStore = createStateStore();
+  const bot = new CodexTelegramBot({
+    telegram,
+    codex,
+    stateStore,
+    config: {
+      allowedUserId: 7,
+      desktopSyncPollMs: 1000,
+      incomingMessageSettleMs: 1,
+      activeWriterMode: "ask",
+    },
+    logger: createLogger(),
+  });
+
+  await bot.handleUpdate({
+    message: { from: { id: 7 }, chat: { id: 100 }, text: "Не запускай без решения" },
+  });
+  await waitFor(() => stateStore.state.pendingWriterDecisions.length === 1);
+
+  const decision = stateStore.state.pendingWriterDecisions[0];
+  const keyboard = sent.find((item) => /Что сделать/.test(item.text)).extra.reply_markup.inline_keyboard;
+  assert.equal(forkCalls, 0);
+  assert.equal(startCalls, 0);
+  assert.match(keyboard[0][0].callback_data, new RegExp(`^writer:fork:${decision.id}$`));
+  assert.match(keyboard[0][1].callback_data, new RegExp(`^writer:cancel:${decision.id}$`));
+
+  await bot.handleUpdate({
+    message: { from: { id: 7 }, chat: { id: 100 }, text: "Второе сообщение тоже не запускай" },
+  });
+  await waitFor(() => sent.some((item) => /Сначала выберите/.test(item.text)));
+  assert.equal(stateStore.state.pendingWriterDecisions.length, 1);
+  assert.equal(startCalls, 0);
+
+  await bot.handleUpdate({ callback_query: {
+    id: "callback-cancel",
+    from: { id: 7 },
+    data: `writer:cancel:${decision.id}`,
+    message: { chat: { id: 100 }, message_id: decision.promptMessageId },
+  } });
+
+  assert.equal(stateStore.state.pendingWriterDecisions.length, 0);
+  assert.equal(forkCalls, 0);
+  assert.equal(startCalls, 0);
+  assert.match(edits.at(-1).text, /диалог не продолжен/);
+  assert.equal(callbacks.at(-1).text, "Сообщение отменено");
+  bot.stop();
+});
+
+test("решение ask после перезапуска создаёт копию и запускает сохранённое сообщение", async () => {
+  const decision = {
+    id: "1234567890abcdef",
+    threadId: "thread-1",
+    chatId: 100,
+    messageThreadId: null,
+    text: "Продолжить только в копии",
+    promptMessageId: 55,
+    createdAt: new Date().toISOString(),
+  };
+  const started = [];
+  const edits = [];
+  const telegram = new EventEmitter();
+  telegram.sendMessage = async () => ({ message_id: 77 });
+  telegram.editMessage = async (chatId, messageId, text, extra = {}) => {
+    edits.push({ chatId, messageId, text, extra });
+  };
+  telegram.answerCallbackQuery = async () => {};
+
+  const codex = new EventEmitter();
+  codex.forkThread = async () => ({
+    thread: { id: "thread-fork", name: "Тест · Telegram", status: { type: "idle" } },
+  });
+  codex.readThread = async () => ({ thread: { status: { type: "idle" }, turns: [] } });
+  codex.listTurns = async () => ({ data: [] });
+  codex.resumeThread = async () => {};
+  codex.startTurn = async (threadId, text) => {
+    started.push({ threadId, text });
+    return { turn: { id: "turn-fork" } };
+  };
+
+  const stateStore = createStateStore({ pendingWriterDecisions: [decision] });
+  const bot = new CodexTelegramBot({
+    telegram,
+    codex,
+    stateStore,
+    config: {
+      allowedUserId: 7,
+      defaultCwd: "C:\\Project",
+      desktopSyncPollMs: 1000,
+      activeWriterMode: "ask",
+    },
+    logger: createLogger(),
+  });
+
+  await bot.handleUpdate({ callback_query: {
+    id: "callback-fork",
+    from: { id: 7 },
+    data: `writer:fork:${decision.id}`,
+    message: { chat: { id: 100 }, message_id: 55 },
+  } });
+
+  assert.deepEqual(started, [{ threadId: "thread-fork", text: decision.text }]);
+  assert.equal(stateStore.state.pendingWriterDecisions.length, 0);
+  assert.equal(stateStore.state.currentThreadId, "thread-fork");
+  assert.match(edits.at(-1).text, /Копия создана/);
+  bot.stop();
 });
 
 test("/sync_topics creates Telegram topics and stores Codex mapping", async () => {
