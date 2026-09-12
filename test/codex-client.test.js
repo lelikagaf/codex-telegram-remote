@@ -2,8 +2,10 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const {
   CHAT_TOOLS_SERVER_NAME,
+  ELEVATION_TOOLS_SERVER_NAME,
   CodexClient,
   buildChatToolsOverrides,
+  buildToolOverrides,
   buildCodexAppServerArgs,
 } = require("../src/codex-client");
 
@@ -250,6 +252,51 @@ test("chat tools bridge can be switched on for old and new chats", async () => {
   for (const call of calls) {
     assert.ok(call.params.config.mcp_servers[CHAT_TOOLS_SERVER_NAME]);
   }
+});
+
+test("elevation bridge is attached to old and new chats and described in turn context", async () => {
+  const launch = { command: "C:\\Codex\\codex.exe", argsPrefix: [] };
+  const overrides = buildToolOverrides({
+    enabled: false,
+    launch,
+    cwd: "C:\\Project",
+    elevationMode: "ask",
+    elevationSpoolPath: "C:\\Spool",
+    elevationTaskName: "Elevated Test",
+    elevationTimeoutMs: 300_000,
+    elevationMaxRuntimeSeconds: 900,
+  });
+  const server = overrides.config.mcp_servers[ELEVATION_TOOLS_SERVER_NAME];
+  assert.match(server.args[0], /codex-elevation-mcp\.js$/);
+  assert.equal(server.env.CODEX_ELEVATION_SPOOL_PATH, "C:\\Spool");
+  assert.equal(server.env.CODEX_ELEVATION_TASK_NAME, "Elevated Test");
+  assert.equal(server.env.CODEX_ELEVATION_TIMEOUT_SECONDS, "300");
+  assert.equal(server.env.CODEX_ELEVATION_MAX_RUNTIME_SECONDS, "900");
+
+  const calls = [];
+  const client = new CodexClient({
+    launch,
+    cwd: "C:\\Project",
+    elevationMode: "ask",
+    elevationSpoolPath: "C:\\Spool",
+    logger: { info() {}, debug() {}, warn() {}, error() {} },
+  });
+  client.request = async (method, params) => {
+    calls.push({ method, params });
+    if (method === "thread/start") return { thread: { id: "new" } };
+    if (method === "thread/resume") return {};
+    return { turn: { id: "turn-1" } };
+  };
+  await client.startThread({ cwd: "C:\\Project" });
+  await client.resumeThread("old");
+  await client.startTurn("old", "Проверь powercfg");
+
+  assert.ok(calls[0].params.config.mcp_servers[ELEVATION_TOOLS_SERVER_NAME]);
+  assert.ok(calls[1].params.config.mcp_servers[ELEVATION_TOOLS_SERVER_NAME]);
+  assert.match(
+    calls[2].params.additionalContext["codex-telegram-remote"].value,
+    /run_windows_command_as_administrator/,
+  );
 });
 
 test("cross-chat context tells every Telegram turn its current thread ID", async () => {

@@ -4,6 +4,7 @@ const {
   parseActiveWriterMode,
   parseApprovalPolicy,
   parseBoolean,
+  parseElevationMode,
   parseEnv,
   parseFileSizeLimitMb,
   parseNonNegativeInteger,
@@ -38,6 +39,13 @@ test("parseActiveWriterMode принимает queue, fork и ask", () => {
   assert.equal(parseActiveWriterMode("FORK"), "fork");
   assert.equal(parseActiveWriterMode("ask"), "ask");
   assert.throws(() => parseActiveWriterMode("takeover"), /CODEX_ACTIVE_WRITER_MODE/);
+});
+
+test("parseElevationMode принимает off, ask и always", () => {
+  assert.equal(parseElevationMode(undefined), "off");
+  assert.equal(parseElevationMode("ASK"), "ask");
+  assert.equal(parseElevationMode("always"), "always");
+  assert.throws(() => parseElevationMode("admin"), /CODEX_ELEVATION_MODE/);
 });
 
 test("parseOutgoingFileAccess принимает управляемые режимы", () => {

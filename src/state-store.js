@@ -23,6 +23,7 @@ class StateStore {
       unmaterializedThreadIds: [],
       pendingThreadModelSettings: {},
       pendingWriterDecisions: [],
+      pendingElevationRequests: [],
     };
   }
 

@@ -57,6 +57,14 @@ function parseActiveWriterMode(value) {
   throw error;
 }
 
+function parseElevationMode(value) {
+  const mode = String(value || "off").trim().toLowerCase();
+  if (["off", "ask", "always"].includes(mode)) return mode;
+  const error = new Error("CODEX_ELEVATION_MODE должен быть off, ask или always.");
+  error.exitCode = 78;
+  throw error;
+}
+
 function parseOutgoingFileAccess(value) {
   const mode = String(value || "workspace").trim().toLowerCase();
   if (["off", "workspace", "all"].includes(mode)) return mode;
@@ -130,6 +138,17 @@ function loadConfig(projectRoot) {
     codexFullAccess: parseBoolean(process.env.CODEX_FULL_ACCESS, false),
     codexAppToolsEnabled: parseBoolean(process.env.CODEX_APP_TOOLS_ENABLED, false),
     activeWriterMode: parseActiveWriterMode(process.env.CODEX_ACTIVE_WRITER_MODE),
+    elevationMode: parseElevationMode(process.env.CODEX_ELEVATION_MODE),
+    elevationTaskName:
+      (process.env.CODEX_ELEVATION_TASK_NAME || "").trim() ||
+      "Codex Telegram Elevated Helper",
+    elevationTimeoutMs:
+      Math.max(30, Number(process.env.CODEX_ELEVATION_TIMEOUT_SECONDS) || 300) * 1000,
+    elevationMaxRuntimeSeconds:
+      Math.max(30, Number(process.env.CODEX_ELEVATION_MAX_RUNTIME_SECONDS) || 600),
+    elevationSpoolPath:
+      (process.env.CODEX_ELEVATION_SPOOL_PATH || "").trim() ||
+      path.join(process.env.LOCALAPPDATA || projectRoot, "CodexTelegramRemote", "elevation"),
     defaultCwd,
     notifyOnStart: parseBoolean(process.env.TELEGRAM_NOTIFY_ON_START, true),
     notifyAfterSleep: parseBoolean(process.env.TELEGRAM_NOTIFY_AFTER_SLEEP, false),
@@ -166,6 +185,7 @@ module.exports = {
   parseApprovalPolicy,
   parseActiveWriterMode,
   parseBoolean,
+  parseElevationMode,
   parseEnv,
   parseFileSizeLimitMb,
   parseNonNegativeInteger,

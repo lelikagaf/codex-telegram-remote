@@ -249,6 +249,19 @@ const RELEASE_HISTORY = [
       "Pending decisions survive bot restarts and duplicate messages do not bypass the confirmation.",
     ],
   },
+  {
+    id: "2026-09-12-telegram-uac-bridge",
+    version: "0.1.23",
+    sequence: 23,
+    title: "Telegram approval for Windows administrator commands",
+    notes: [
+      "Added a separate RunLevel=Highest helper for one-shot Windows administrator commands without elevating the network-facing bot.",
+      "Codex now sends the exact command, working directory, and elevation reason to Telegram with approve and cancel buttons.",
+      "The active Codex turn waits for the owner decision and receives stdout, stderr, and the exit code from the elevated command.",
+      "Added CODEX_ELEVATION_MODE=off|ask|always plus configurable approval and execution timeouts.",
+      "/chats now shows ten chats per page with Back and Next buttons while keeping /use scoped to the visible page.",
+    ],
+  },
 ];
 
 const CURRENT_RELEASE = RELEASE_HISTORY.at(-1);

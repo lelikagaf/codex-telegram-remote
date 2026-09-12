@@ -4,28 +4,60 @@ const path = require("node:path");
 const readline = require("node:readline");
 
 const CHAT_TOOLS_SERVER_NAME = "codex_telegram_chats";
+const ELEVATION_TOOLS_SERVER_NAME = "codex_telegram_elevation";
 
-function buildChatToolsOverrides({ enabled, launch, cwd, fullAccess = false }) {
-  if (!enabled) return {};
-  const serverPath = path.resolve(__dirname, "..", "scripts", "codex-chat-mcp.js");
+function buildToolOverrides({
+  enabled,
+  launch,
+  cwd,
+  fullAccess = false,
+  elevationMode = "off",
+  elevationSpoolPath = null,
+  elevationTaskName = "Codex Telegram Elevated Helper",
+  elevationTimeoutMs = 300_000,
+  elevationMaxRuntimeSeconds = 600,
+}) {
+  const mcpServers = {};
+  if (enabled) {
+    const serverPath = path.resolve(__dirname, "..", "scripts", "codex-chat-mcp.js");
+    mcpServers[CHAT_TOOLS_SERVER_NAME] = {
+      command: process.execPath,
+      args: [serverPath],
+      env: {
+        CODEX_CHAT_BRIDGE_COMMAND: launch.command,
+        CODEX_CHAT_BRIDGE_ARGS: JSON.stringify(launch.argsPrefix || []),
+        CODEX_CHAT_BRIDGE_CWD: cwd,
+        CODEX_CHAT_BRIDGE_FULL_ACCESS: fullAccess ? "true" : "false",
+      },
+      startup_timeout_sec: 30,
+      tool_timeout_sec: 120,
+    };
+  }
+  if (elevationMode !== "off") {
+    const serverPath = path.resolve(__dirname, "..", "scripts", "codex-elevation-mcp.js");
+    mcpServers[ELEVATION_TOOLS_SERVER_NAME] = {
+      command: process.execPath,
+      args: [serverPath],
+      env: {
+        CODEX_ELEVATION_SPOOL_PATH: elevationSpoolPath,
+        CODEX_ELEVATION_TASK_NAME: elevationTaskName,
+        CODEX_ELEVATION_TIMEOUT_SECONDS: String(Math.ceil(elevationTimeoutMs / 1000)),
+        CODEX_ELEVATION_MAX_RUNTIME_SECONDS: String(elevationMaxRuntimeSeconds),
+      },
+      startup_timeout_sec: 30,
+      tool_timeout_sec: Math.ceil((elevationTimeoutMs + 660_000) / 1000),
+    };
+  }
+  if (!Object.keys(mcpServers).length) return {};
   return {
     config: {
-      mcp_servers: {
-        [CHAT_TOOLS_SERVER_NAME]: {
-          command: process.execPath,
-          args: [serverPath],
-          env: {
-            CODEX_CHAT_BRIDGE_COMMAND: launch.command,
-            CODEX_CHAT_BRIDGE_ARGS: JSON.stringify(launch.argsPrefix || []),
-            CODEX_CHAT_BRIDGE_CWD: cwd,
-            CODEX_CHAT_BRIDGE_FULL_ACCESS: fullAccess ? "true" : "false",
-          },
-          startup_timeout_sec: 30,
-          tool_timeout_sec: 120,
-        },
-      },
+      mcp_servers: mcpServers,
     },
   };
+}
+
+function buildChatToolsOverrides(options) {
+  return buildToolOverrides({ ...options, elevationMode: "off" });
 }
 
 function buildCodexAppServerArgs({
@@ -64,6 +96,11 @@ class CodexClient extends EventEmitter {
     approvalPolicy = "never",
     fullAccess = false,
     appToolsEnabled = false,
+    elevationMode = "off",
+    elevationSpoolPath = null,
+    elevationTaskName = "Codex Telegram Elevated Helper",
+    elevationTimeoutMs = 300_000,
+    elevationMaxRuntimeSeconds = 600,
     logger,
   }) {
     super();
@@ -72,6 +109,11 @@ class CodexClient extends EventEmitter {
     this.approvalPolicy = approvalPolicy;
     this.fullAccess = fullAccess;
     this.appToolsEnabled = appToolsEnabled;
+    this.elevationMode = elevationMode;
+    this.elevationSpoolPath = elevationSpoolPath;
+    this.elevationTaskName = elevationTaskName;
+    this.elevationTimeoutMs = elevationTimeoutMs;
+    this.elevationMaxRuntimeSeconds = elevationMaxRuntimeSeconds;
     this.logger = logger;
     this.child = null;
     this.lineReader = null;
@@ -102,6 +144,7 @@ class CodexClient extends EventEmitter {
       approvalPolicy: this.fullAccess ? "never" : this.approvalPolicy,
       fullAccess: this.fullAccess,
       appToolsEnabled: this.appToolsEnabled,
+      elevationMode: this.elevationMode,
     });
     this.loadedThreads.clear();
     this.child = spawn(
@@ -303,11 +346,16 @@ class CodexClient extends EventEmitter {
     const accessOverrides = this.fullAccess
       ? { approvalPolicy: "never", sandbox: "danger-full-access" }
       : {};
-    const appToolsOverrides = buildChatToolsOverrides({
+    const appToolsOverrides = buildToolOverrides({
       enabled: this.appToolsEnabled,
       launch: this.launch,
       cwd: this.cwd,
       fullAccess: this.fullAccess,
+      elevationMode: this.elevationMode,
+      elevationSpoolPath: this.elevationSpoolPath,
+      elevationTaskName: this.elevationTaskName,
+      elevationTimeoutMs: this.elevationTimeoutMs,
+      elevationMaxRuntimeSeconds: this.elevationMaxRuntimeSeconds,
     });
     const result = await this.request(
       "thread/resume",
@@ -327,11 +375,16 @@ class CodexClient extends EventEmitter {
     const accessOverrides = this.fullAccess
       ? { approvalPolicy: "never", sandbox: "danger-full-access" }
       : {};
-    const appToolsOverrides = buildChatToolsOverrides({
+    const appToolsOverrides = buildToolOverrides({
       enabled: this.appToolsEnabled,
       launch: this.launch,
       cwd: this.cwd,
       fullAccess: this.fullAccess,
+      elevationMode: this.elevationMode,
+      elevationSpoolPath: this.elevationSpoolPath,
+      elevationTaskName: this.elevationTaskName,
+      elevationTimeoutMs: this.elevationTimeoutMs,
+      elevationMaxRuntimeSeconds: this.elevationMaxRuntimeSeconds,
     });
     const result = await this.request(
       "thread/start",
@@ -360,11 +413,16 @@ class CodexClient extends EventEmitter {
     const accessOverrides = this.fullAccess
       ? { approvalPolicy: "never", sandbox: "danger-full-access" }
       : {};
-    const appToolsOverrides = buildChatToolsOverrides({
+    const appToolsOverrides = buildToolOverrides({
       enabled: this.appToolsEnabled,
       launch: this.launch,
       cwd: this.cwd,
       fullAccess: this.fullAccess,
+      elevationMode: this.elevationMode,
+      elevationSpoolPath: this.elevationSpoolPath,
+      elevationTaskName: this.elevationTaskName,
+      elevationTimeoutMs: this.elevationTimeoutMs,
+      elevationMaxRuntimeSeconds: this.elevationMaxRuntimeSeconds,
     });
     const result = await this.request(
       "thread/fork",
@@ -436,16 +494,27 @@ class CodexClient extends EventEmitter {
           sandboxPolicy: { type: "dangerFullAccess" },
         }
       : {};
-    const appContext = this.appToolsEnabled
+    const contextLines = [];
+    if (this.appToolsEnabled) {
+      contextLines.push(
+        `Current Codex thread ID: ${threadId}`,
+        "The codex_telegram_chats tools can list, read, and send messages to other Codex chats.",
+        "When the user asks about another chat or asks to send something there, use those tools before claiming the action is unavailable.",
+      );
+    }
+    if (this.elevationMode !== "off") {
+      if (!contextLines.length) contextLines.push(`Current Codex thread ID: ${threadId}`);
+      contextLines.push(
+        "The codex_telegram_elevation tool can run Windows commands with administrator privileges after Telegram authorization.",
+        "For UAC/admin operations or errors saying elevation is required, call run_windows_command_as_administrator instead of Start-Process -Verb RunAs or asking for a local UAC click.",
+      );
+    }
+    const appContext = contextLines.length
       ? {
           additionalContext: {
             "codex-telegram-remote": {
               kind: "application",
-              value: [
-                `Current Codex thread ID: ${threadId}`,
-                "The codex_telegram_chats tools can list, read, and send messages to other Codex chats.",
-                "When the user asks about another chat or asks to send something there, use those tools before claiming the action is unavailable.",
-              ].join("\n"),
+              value: contextLines.join("\n"),
             },
           },
         }
@@ -503,8 +572,10 @@ class CodexClient extends EventEmitter {
 
 module.exports = {
   CHAT_TOOLS_SERVER_NAME,
+  ELEVATION_TOOLS_SERVER_NAME,
   CodexClient,
   CodexRpcError,
   buildChatToolsOverrides,
+  buildToolOverrides,
   buildCodexAppServerArgs,
 };

@@ -9,7 +9,7 @@
 
 ## Возможности
 
-- `/chats` — последние чаты Codex с кнопками выбора;
+- `/chats` — чаты Codex по 10 на странице с кнопками выбора, назад и вперёд;
 - `/current` — текущий выбранный чат;
 - `/use N` — выбор чата по номеру;
 - `/new Название` — создание нового чата;
@@ -20,6 +20,7 @@
   каталога и передача Codex вместе с подписью пользователя;
 - `/status`, `/stop`, `/steer текст` — управление выполняющейся задачей;
 - `/approve` и `/deny` — ответы на запросы разрешения Codex;
+- подтверждение административных команд Windows кнопкой в Telegram;
 - потоковое обновление ответа в Telegram;
 - финальный ответ на Telegram-задачу отдельным новым сообщением, чтобы телефон
   показывал обычное уведомление;
@@ -131,6 +132,11 @@ CODEX_APPROVAL_POLICY=never
 CODEX_FULL_ACCESS=false
 CODEX_APP_TOOLS_ENABLED=false
 CODEX_ACTIVE_WRITER_MODE=queue
+CODEX_ELEVATION_MODE=off
+CODEX_ELEVATION_TASK_NAME=Codex Telegram Elevated Helper
+CODEX_ELEVATION_TIMEOUT_SECONDS=300
+CODEX_ELEVATION_MAX_RUNTIME_SECONDS=600
+CODEX_ELEVATION_SPOOL_PATH=
 TELEGRAM_NOTIFY_ON_START=true
 TELEGRAM_NOTIFY_AFTER_SLEEP=false
 TELEGRAM_MAX_FILE_SIZE_MB=0
@@ -163,6 +169,16 @@ LOG_LEVEL=info
 Значение `ask` не продолжает диалог автоматически: бот показывает кнопки
 «Создать копию и продолжить» и «Ничего не делать». До выбора сообщение хранится
 локально и не передаётся в Codex; отмена удаляет его без создания нового хода.
+`CODEX_ELEVATION_MODE=ask` подключает к старым и новым Telegram-чатам локальный
+инструмент административных команд. Codex передаёт точную PowerShell-команду,
+рабочую папку и причину, после чего бот показывает владельцу кнопки
+«Выполнить от администратора» и «Отмена». Операция запускается отдельной
+задачей Планировщика с `RunLevel=Highest`; текущий ход Codex ждёт результат и
+продолжается после выполнения. `off` полностью отключает инструмент, а
+`always` запускает полученную административную команду без кнопки.
+`CODEX_ELEVATION_TIMEOUT_SECONDS` задаёт срок действия запроса, а
+`CODEX_ELEVATION_MAX_RUNTIME_SECONDS` — предельное время команды. Каталог
+очереди по умолчанию расположен в `%LOCALAPPDATA%\CodexTelegramRemote\elevation`.
 `TELEGRAM_MAX_FILE_SIZE_MB` задаёт максимальный размер загружаемого документа в
 мегабайтах. Значения `0` и `-1` отключают ограничение со стороны бота. При этом
 могут сохраняться собственные технические ограничения Telegram Bot API.
@@ -217,6 +233,20 @@ powershell -ExecutionPolicy Bypass -File .\scripts\install-autostart.ps1
 Start-ScheduledTask -TaskName "Codex Telegram Remote"
 ```
 
+Для административных команд один раз установите повышенный помощник из окна
+PowerShell. Windows покажет UAC только при установке:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\install-elevation-helper.ps1
+```
+
+После установки задайте `CODEX_ELEVATION_MODE=ask` и перезапустите основную
+задачу. Удаление помощника:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\uninstall-elevation-helper.ps1
+```
+
 Удалить:
 
 ```powershell
@@ -234,6 +264,10 @@ powershell -ExecutionPolicy Bypass -File .\scripts\uninstall-autostart.ps1
 - При утечке токена выполните `/revoke` у `@BotFather`.
 - Любой пользователь, кроме `TELEGRAM_ALLOWED_USER_ID`, блокируется.
 - `/approve` разрешает действие внутри Codex, но не обходит Windows UAC.
+- `CODEX_ELEVATION_MODE=ask` обходит необходимость локально нажимать UAC только
+  через заранее установленную повышенную задачу и отдельное подтверждение
+  владельца в Telegram. Точная команда привязана к одноразовому запросу и
+  проверяется контрольной суммой перед запуском.
 - По умолчанию `CODEX_APPROVAL_POLICY=never` отключает частые запросы
   подтверждения, но не включает опасный обход sandbox.
 - `CODEX_FULL_ACCESS=true` дополнительно отключает sandbox и принудительно
@@ -248,6 +282,8 @@ powershell -ExecutionPolicy Bypass -File .\scripts\uninstall-autostart.ps1
   `off`, чтобы снова ограничить или полностью отключить эту возможность.
 - Бот получает доступ к тем же файлам, что и вошедший пользователь Windows.
 - Не запускайте весь бот с постоянными правами администратора.
+- Режим `always` фактически предоставляет Telegram постоянный удалённый
+  административный запуск; для повседневного использования выбирайте `ask`.
 - Не храните рабочий экземпляр на общедоступном сетевом диске.
 - Имена документов очищаются от путей и недопустимых для Windows символов;
   неполные загрузки удаляются.

@@ -37,7 +37,7 @@ const REASONING_EFFORT_DESCRIPTIONS = {
 
 const HELP_TEXT = [
   "Команды:",
-  "/chats — последние чаты Codex",
+  "/chats — чаты Codex по 10, кнопки назад и вперёд",
   "/current — выбранный чат",
   "/use 2 — выбрать чат из последнего списка",
   "/new Название — создать новый чат",
@@ -539,7 +539,15 @@ function formatTelegramTurnResult(turn, text) {
 }
 
 class CodexTelegramBot {
-  constructor({ telegram, codex, stateStore, config, logger, releaseTracker = null }) {
+  constructor({
+    telegram,
+    codex,
+    stateStore,
+    config,
+    logger,
+    releaseTracker = null,
+    elevationQueue = null,
+  }) {
     this.telegram = telegram;
     this.codex = codex;
     this.stateStore = stateStore;
@@ -547,7 +555,11 @@ class CodexTelegramBot {
     this.config = config;
     this.logger = logger;
     this.releaseTracker = releaseTracker;
+    this.elevationQueue = elevationQueue;
     this.lastThreads = [];
+    this.lastThreadsByTarget = new Map();
+    this.chatListSessions = new Map();
+    this.chatPaginationInFlight = new Set();
     this.activeByThread = new Map();
     this.activeByTurn = new Map();
     this.pendingApprovals = new Map();
@@ -564,6 +576,9 @@ class CodexTelegramBot {
     this.drainingPromptThreads = new Set();
     this.busyQueueNotices = new Set();
     this.writerDecisionInFlight = new Set();
+    this.elevationDecisionInFlight = new Set();
+    this.elevationPollTimer = null;
+    this.elevationPollRunning = false;
     this.unmaterializedThreadIds = new Set(this.state.unmaterializedThreadIds || []);
     this.runtimeNewThreadIds = new Set();
 
@@ -595,6 +610,11 @@ class CodexTelegramBot {
     this.logger.info("Политика конфликта writer Codex", {
       mode: this.config.activeWriterMode || "queue",
     });
+    this.logger.info("Повышение прав Windows через Telegram", {
+      mode: this.config.elevationMode || "off",
+      taskName: this.config.elevationTaskName,
+      spoolPath: this.config.elevationSpoolPath,
+    });
     await this.telegram.deleteWebhook();
     await this.telegram.setMyCommands([
       { command: "chats", description: "Список чатов Codex" },
@@ -615,6 +635,15 @@ class CodexTelegramBot {
       { command: "releases", description: "Release history" },
     ]);
     await this.codex.ensureStarted();
+    if (this.elevationQueue && this.config.elevationMode !== "off") {
+      await this.#pollElevationRequests();
+      this.elevationPollTimer = setInterval(() => {
+        this.#pollElevationRequests().catch((error) =>
+          this.logger.warn("Не удалось обработать запрос повышения прав", error.message),
+        );
+      }, 500);
+      this.elevationPollTimer.unref?.();
+    }
     try {
       await this.#initializeDesktopSync();
     } catch (error) {
@@ -650,14 +679,213 @@ class CodexTelegramBot {
   stop() {
     if (this.desktopSyncTimer) clearInterval(this.desktopSyncTimer);
     if (this.writerReleaseTimer) clearTimeout(this.writerReleaseTimer);
+    if (this.elevationPollTimer) clearInterval(this.elevationPollTimer);
     this.desktopSyncTimer = null;
     this.writerReleaseTimer = null;
+    this.elevationPollTimer = null;
     for (const batch of this.documentBatches.values()) {
       if (batch.timer) clearTimeout(batch.timer);
     }
     this.documentBatches.clear();
     this.busyQueueNotices.clear();
     this.writerDecisionInFlight.clear();
+    this.elevationDecisionInFlight.clear();
+    this.chatListSessions.clear();
+    this.lastThreadsByTarget.clear();
+    this.chatPaginationInFlight.clear();
+  }
+
+  #removeElevationRequest(requestId) {
+    this.state = this.stateStore.save({
+      pendingElevationRequests: (this.state.pendingElevationRequests || []).filter(
+        (item) => item?.id !== requestId,
+      ),
+    });
+  }
+
+  #replaceElevationRequest(entry) {
+    this.state = this.stateStore.save({
+      pendingElevationRequests: [
+        ...(this.state.pendingElevationRequests || []).filter((item) => item?.id !== entry.id),
+        entry,
+      ].slice(-50),
+    });
+  }
+
+  #targetForElevationRequest(request) {
+    return this.activeByThread.get(request.threadId)?.chatId || this.state.lastChatId || null;
+  }
+
+  async #sendElevationPrompt(request, target) {
+    const reason = request.reason || "операция требует административного токена Windows";
+    const heading = [
+      "🛡 Требуется выполнение от администратора Windows.",
+      `Причина: ${reason}`,
+      `Папка: ${request.cwd}`,
+      "Команда:",
+      request.command,
+    ].join("\n");
+    if (heading.length > 3700) {
+      await this.telegram.sendLongMessage(target, heading);
+    }
+    const confirmationText = heading.length > 3700
+      ? "Подтвердить выполнение показанной выше команды от администратора?"
+      : heading;
+    return this.telegram.sendMessage(target, confirmationText, {
+      reply_markup: {
+        inline_keyboard: [[
+          {
+            text: "✅ Выполнить от администратора",
+            callback_data: `elevation:approve:${request.id}`,
+          },
+          { text: "🚫 Отмена", callback_data: `elevation:deny:${request.id}` },
+        ]],
+      },
+    });
+  }
+
+  async #pollElevationRequests() {
+    if (this.elevationPollRunning || !this.elevationQueue) return;
+    this.elevationPollRunning = true;
+    try {
+      for (const entry of [...(this.state.pendingElevationRequests || [])]) {
+        if (this.elevationQueue.hasResult(entry.id)) this.#removeElevationRequest(entry.id);
+      }
+
+      for (const request of this.elevationQueue.listPendingRequests()) {
+        const existing = (this.state.pendingElevationRequests || []).find(
+          (item) => item?.id === request.id,
+        );
+        if (existing) continue;
+        if (Date.parse(request.expiresAt) <= Date.now()) {
+          this.elevationQueue.finish(request.id, {
+            status: "expired",
+            message: "Срок подтверждения административной команды истёк.",
+          });
+          continue;
+        }
+        const target = this.#targetForElevationRequest(request);
+        if (!target) {
+          this.elevationQueue.finish(request.id, {
+            status: "failed",
+            message: "Telegram-чат владельца для подтверждения не найден.",
+          });
+          continue;
+        }
+
+        if (this.config.elevationMode === "always") {
+          const message = await this.telegram.sendMessage(
+            target,
+            [
+              "🛡 Выполняю административную команду автоматически.",
+              `Причина: ${request.reason || "требуются права администратора"}`,
+              `Папка: ${request.cwd}`,
+              "Команда:",
+              request.command,
+            ].join("\n"),
+          );
+          this.elevationQueue.approve(request.id);
+          this.#replaceElevationRequest({
+            id: request.id,
+            threadId: request.threadId,
+            chatId: typeof target === "object" ? target.chatId : target,
+            messageThreadId: typeof target === "object" ? target.messageThreadId || null : null,
+            promptMessageId: message.message_id,
+            status: "running",
+          });
+          try {
+            this.elevationQueue.triggerHelper();
+          } catch (error) {
+            this.elevationQueue.finish(request.id, { status: "failed", message: error.message });
+            this.#removeElevationRequest(request.id);
+            await this.telegram.sendMessage(target, `❌ Не удалось запустить повышенный помощник: ${error.message}`);
+          }
+          continue;
+        }
+
+        const message = await this.#sendElevationPrompt(request, target);
+        this.#replaceElevationRequest({
+          id: request.id,
+          threadId: request.threadId,
+          chatId: typeof target === "object" ? target.chatId : target,
+          messageThreadId: typeof target === "object" ? target.messageThreadId || null : null,
+          promptMessageId: message.message_id,
+          status: "pending",
+          expiresAt: request.expiresAt,
+        });
+        this.logger.info("Запрошено подтверждение административной команды", {
+          requestId: request.id,
+          threadId: request.threadId,
+          cwd: request.cwd,
+        });
+      }
+    } finally {
+      this.elevationPollRunning = false;
+    }
+  }
+
+  async #handleElevationCallback(query, target, data) {
+    const match = /^elevation:(approve|deny):([a-f0-9]{32})$/.exec(data);
+    if (!match) return false;
+    const [, action, requestId] = match;
+    const entry = (this.state.pendingElevationRequests || []).find(
+      (item) => item?.id === requestId,
+    );
+    if (
+      !entry ||
+      entry.status !== "pending" ||
+      Number(entry.chatId) !== Number(target.chatId) ||
+      Number(entry.messageThreadId || 0) !== Number(target.messageThreadId || 0)
+    ) {
+      await this.telegram.answerCallbackQuery(query.id, "Запрос уже неактуален");
+      return true;
+    }
+    if (this.elevationDecisionInFlight.has(requestId)) {
+      await this.telegram.answerCallbackQuery(query.id, "Действие уже выполняется");
+      return true;
+    }
+    this.elevationDecisionInFlight.add(requestId);
+    try {
+      if (action === "deny") {
+        this.elevationQueue.deny(requestId);
+        this.#removeElevationRequest(requestId);
+        await this.telegram.answerCallbackQuery(query.id, "Команда отменена");
+        await this.telegram.editMessage(
+          target,
+          entry.promptMessageId,
+          "🚫 Административная команда отменена. Она не выполнялась.",
+          { reply_markup: { inline_keyboard: [] } },
+        );
+        return true;
+      }
+
+      this.elevationQueue.approve(requestId);
+      this.#replaceElevationRequest({ ...entry, status: "running", approvedAt: new Date().toISOString() });
+      await this.telegram.answerCallbackQuery(query.id, "Запускаю от администратора…");
+      await this.telegram.editMessage(
+        target,
+        entry.promptMessageId,
+        "🛡 Подтверждено. Команда выполняется от администратора Windows…",
+        { reply_markup: { inline_keyboard: [] } },
+      );
+      try {
+        this.elevationQueue.triggerHelper();
+      } catch (error) {
+        this.elevationQueue.finish(requestId, { status: "failed", message: error.message });
+        this.#removeElevationRequest(requestId);
+        await this.telegram.sendMessage(
+          target,
+          `❌ Не удалось запустить повышенный помощник: ${error.message}`,
+        );
+      }
+      return true;
+    } catch (error) {
+      await this.telegram.answerCallbackQuery(query.id, "Не удалось выполнить действие");
+      await this.telegram.sendMessage(target, `❌ ${error.message}`);
+      return true;
+    } finally {
+      this.elevationDecisionInFlight.delete(requestId);
+    }
   }
 
   #busyQueueNoticeKey(threadId, chatId, text) {
@@ -858,6 +1086,10 @@ class CodexTelegramBot {
 
   #topicKey(chatId, messageThreadId) {
     return `${chatId}:${messageThreadId}`;
+  }
+
+  #chatListTargetKey(target) {
+    return this.#topicKey(target.chatId, target.messageThreadId || 0);
   }
 
   #threadTopicKey(chatId, threadId) {
@@ -1238,7 +1470,9 @@ class CodexTelegramBot {
     }
 
     const data = String(query.data || "");
+    if (await this.#handleElevationCallback(query, target, data)) return;
     if (await this.#handleWriterDecisionCallback(query, target, data)) return;
+    if (await this.#handleChatPaginationCallback(query, target, data)) return;
     if (data.startsWith("use:")) {
       const threadId = data.slice(4);
       await this.#selectThread(target, threadId);
@@ -1249,22 +1483,145 @@ class CodexTelegramBot {
   }
 
   async #showChats(target) {
-    this.lastThreads = await this.#listThreadsWithCurrent(target, 10);
+    const session = {
+      id: randomUUID().replace(/-/g, "").slice(0, 16),
+      targetKey: this.#chatListTargetKey(target),
+      page: 1,
+      cursors: [null],
+      nextCursor: null,
+    };
+    this.chatListSessions.set(session.id, session);
+    while (this.chatListSessions.size > 50) {
+      this.chatListSessions.delete(this.chatListSessions.keys().next().value);
+    }
+    await this.#renderChatPage(target, session, { page: 1, cursor: null });
+  }
+
+  async #loadChatPage(target, page, cursor) {
+    let result = await this.codex.listThreads({ limit: 10, cursor });
+    let threads = result.data || [];
+    if (page !== 1) return { threads, nextCursor: result.nextCursor || null };
+
     const currentThreadId = this.#threadIdForTarget(target);
-    this.state = this.stateStore.save({
-      lastListedThreadIds: this.lastThreads.map((thread) => thread.id),
-    });
-    const keyboard = this.lastThreads.map((thread, index) => [
+    if (!currentThreadId || threads.some((thread) => thread.id === currentThreadId)) {
+      return { threads, nextCursor: result.nextCursor || null };
+    }
+
+    let current = null;
+    try {
+      current = (await this.codex.readThread(currentThreadId, false)).thread;
+    } catch (error) {
+      if (isUnmaterializedThreadError(error)) {
+        current = {
+          id: currentThreadId,
+          name: this.#threadNameForTarget(target),
+          cwd: this.config.defaultCwd,
+        };
+      } else {
+        this.logger.warn("Не удалось добавить выбранный чат в первую страницу", {
+          threadId: currentThreadId,
+          message: error.message,
+        });
+        return { threads, nextCursor: result.nextCursor || null };
+      }
+    }
+
+    // The selected draft occupies one of ten rows. Requesting nine source rows
+    // again keeps the server cursor exact, so no chat is skipped on page two.
+    result = await this.codex.listThreads({ limit: 9, cursor: null });
+    threads = [current, ...(result.data || [])];
+    return { threads, nextCursor: result.nextCursor || null };
+  }
+
+  #chatPageKeyboard(session, threads, currentThreadId, nextCursor) {
+    const keyboard = threads.map((thread, index) => [
       {
         text: `${thread.id === currentThreadId ? "●" : "○"} ${index + 1}. ${threadTitle(thread).slice(0, 45)}`,
         callback_data: `use:${thread.id}`,
       },
     ]);
-    await this.telegram.sendMessage(
-      target,
-      formatThreadList(this.lastThreads, currentThreadId),
-      keyboard.length ? { reply_markup: { inline_keyboard: keyboard } } : {},
+    if (session.page > 1 || nextCursor) {
+      keyboard.push([
+        ...(session.page > 1
+          ? [{ text: "⬅️ Назад", callback_data: `chats:prev:${session.id}` }]
+          : []),
+        { text: `Страница ${session.page}`, callback_data: `chats:noop:${session.id}` },
+        ...(nextCursor
+          ? [{ text: "Вперёд ➡️", callback_data: `chats:next:${session.id}` }]
+          : []),
+      ]);
+    }
+    return keyboard;
+  }
+
+  async #renderChatPage(target, session, { page, cursor, messageId = null }) {
+    const loaded = await this.#loadChatPage(target, page, cursor);
+    session.page = page;
+    session.cursors[page - 1] = cursor;
+    session.nextCursor = loaded.nextCursor;
+    session.updatedAt = Date.now();
+    this.lastThreads = loaded.threads;
+    this.lastThreadsByTarget.set(session.targetKey, loaded.threads);
+    this.state = this.stateStore.save({
+      lastListedThreadIds: loaded.threads.map((thread) => thread.id),
+    });
+    const currentThreadId = this.#threadIdForTarget(target);
+    const keyboard = this.#chatPageKeyboard(
+      session,
+      loaded.threads,
+      currentThreadId,
+      loaded.nextCursor,
     );
+    const text = `${formatThreadList(loaded.threads, currentThreadId)}\nСтраница: ${page}`;
+    const extra = keyboard.length ? { reply_markup: { inline_keyboard: keyboard } } : {};
+    if (messageId) {
+      await this.telegram.editMessage(target, messageId, text, extra);
+    } else {
+      const message = await this.telegram.sendMessage(target, text, extra);
+      session.messageId = message.message_id;
+    }
+  }
+
+  async #handleChatPaginationCallback(query, target, data) {
+    const match = /^chats:(next|prev|noop):([a-f0-9]{16})$/.exec(data);
+    if (!match) return false;
+    const [, action, sessionId] = match;
+    const session = this.chatListSessions.get(sessionId);
+    if (!session || session.targetKey !== this.#chatListTargetKey(target)) {
+      await this.telegram.answerCallbackQuery(query.id, "Список устарел. Выполни /chats");
+      return true;
+    }
+    if (action === "noop") {
+      await this.telegram.answerCallbackQuery(query.id, `Страница ${session.page}`);
+      return true;
+    }
+    if (this.chatPaginationInFlight.has(sessionId)) {
+      await this.telegram.answerCallbackQuery(query.id, "Страница уже загружается");
+      return true;
+    }
+
+    const page = action === "next" ? session.page + 1 : session.page - 1;
+    const cursor = action === "next" ? session.nextCursor : session.cursors[page - 1];
+    if (page < 1 || cursor === undefined || (action === "next" && !cursor)) {
+      await this.telegram.answerCallbackQuery(query.id, "Больше страниц нет");
+      return true;
+    }
+
+    this.chatPaginationInFlight.add(sessionId);
+    try {
+      await this.#renderChatPage(target, session, {
+        page,
+        cursor,
+        messageId: query.message?.message_id || session.messageId,
+      });
+      await this.telegram.answerCallbackQuery(query.id, `Страница ${page}`);
+    } catch (error) {
+      this.logger.warn("Не удалось перелистнуть список чатов", error.message);
+      await this.telegram.answerCallbackQuery(query.id, "Не удалось загрузить страницу");
+    } finally {
+      this.chatPaginationInFlight.delete(sessionId);
+    }
+    return true;
   }
 
   async #listThreadsWithCurrent(target, limit) {
@@ -1306,14 +1663,18 @@ class CodexTelegramBot {
       await this.telegram.sendMessage(target, "Укажи номер: /use 2");
       return;
     }
-    if (!this.lastThreads.length) {
+    const targetKey = this.#chatListTargetKey(target);
+    let listedThreads = this.lastThreadsByTarget.get(targetKey) || this.lastThreads;
+    if (!listedThreads.length) {
       const result = await this.codex.listThreads({ limit: 10 });
-      this.lastThreads = result.data || [];
+      listedThreads = result.data || [];
+      this.lastThreads = listedThreads;
+      this.lastThreadsByTarget.set(targetKey, listedThreads);
     }
 
     let thread = null;
-    if (/^\d+$/.test(argument)) thread = this.lastThreads[Number(argument) - 1] || null;
-    if (!thread) thread = this.lastThreads.find((item) => item.id.startsWith(argument));
+    if (/^\d+$/.test(argument)) thread = listedThreads[Number(argument) - 1] || null;
+    if (!thread) thread = listedThreads.find((item) => item.id.startsWith(argument));
     if (!thread) {
       await this.telegram.sendMessage(target, "Чат не найден. Обнови список командой /chats.");
       return;
@@ -1365,6 +1726,7 @@ class CodexTelegramBot {
       thread,
       ...this.lastThreads.filter((item) => item.id !== thread.id),
     ].slice(0, 10);
+    this.lastThreadsByTarget.set(this.#chatListTargetKey(target), this.lastThreads);
     this.desktopSyncSuspended = true;
     this.state = this.stateStore.save({
       currentThreadId: thread.id,
@@ -1444,6 +1806,7 @@ class CodexTelegramBot {
     const limit = Math.min(50, Math.max(1, Math.floor(Number(argument) || 10)));
     const threads = await this.#listThreadsWithCurrent(target, limit);
     this.lastThreads = threads;
+    this.lastThreadsByTarget.set(this.#chatListTargetKey(target), threads);
     this.state = this.stateStore.save({
       lastListedThreadIds: threads.map((thread) => thread.id),
     });
@@ -1976,17 +2339,22 @@ class CodexTelegramBot {
     const writerDecisions = (this.state.pendingWriterDecisions || []).filter(
       (item) => !threadId || item.threadId === threadId,
     );
+    const elevationRequests = (this.state.pendingElevationRequests || []).filter(
+      (item) => !threadId || item.threadId === threadId,
+    );
     const lines = [
       `Codex app-server: ${this.codex.isRunning ? "работает" : "остановлен"}`,
       `Текущий чат: ${this.#threadNameForTarget(target) || "не выбран"}`,
       `Задача: ${active ? "выполняется" : "нет активной"}`,
       `Ожидает взаимодействия: ${approvals.length}`,
       `Ожидает решения по блокировке: ${writerDecisions.length}`,
+      `Административные команды: ${elevationRequests.length}`,
       `Полный доступ: ${this.config.codexFullAccess ? "включён" : "выключен"}`,
       `Доступ к другим чатам: ${this.config.codexAppToolsEnabled ? "включён" : "выключен"}`,
       `Отправка локальных файлов: ${this.config.telegramOutgoingFileAccess || "workspace"}`,
       `Подтверждения: ${this.config.codexFullAccess ? "never" : this.config.codexApprovalPolicy}`,
       `Конфликт с Desktop: ${this.config.activeWriterMode || "queue"}`,
+      `Повышение Windows: ${this.config.elevationMode || "off"}`,
       `Загружено ботом чатов: ${this.codex.loadedThreadCount ?? "неизвестно"}`,
     ];
     await this.telegram.sendMessage(target, lines.join("\n"));
@@ -1997,6 +2365,7 @@ class CodexTelegramBot {
     const appToolsEnabled = Boolean(this.config.codexAppToolsEnabled);
     const outgoingFileAccess = this.config.telegramOutgoingFileAccess || "workspace";
     const writerMode = this.config.activeWriterMode || "queue";
+    const elevationMode = this.config.elevationMode || "off";
     const writerModeDescription = writerMode === "ask"
       ? "спросить: создать копию или отменить сообщение"
       : writerMode === "fork"
@@ -2013,8 +2382,9 @@ class CodexTelegramBot {
         `Лимит исходящего файла: ${formatFileSizeLimit(this.config.telegramOutgoingMaxFileBytes)}`,
         `Файлов из одного ответа: ${this.config.telegramOutgoingMaxFiles > 0 ? this.config.telegramOutgoingMaxFiles : "без ограничения"}`,
         `Конфликт writer с Desktop: ${writerMode} — ${writerModeDescription}`,
+        `Административные команды Windows: ${elevationMode === "ask" ? "подтверждение кнопкой в Telegram" : elevationMode === "always" ? "автоматическое выполнение" : "отключены"}`,
         "Область: каждый новый ход через Telegram, во всех старых и новых чатах.",
-        "Computer Use и плагины наследуются от Codex; отдельные системные ограничения Windows и приложений сохраняются.",
+        "Computer Use и плагины наследуются от Codex; административные команды выполняются отдельным повышенным помощником.",
         "Отключение доступа к другим чатам: CODEX_APP_TOOLS_ENABLED=false; файлов: TELEGRAM_OUTGOING_FILE_ACCESS=off. Затем перезапустить задачу.",
       ].join("\n"),
     );

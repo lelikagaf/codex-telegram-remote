@@ -2,6 +2,7 @@ const path = require("node:path");
 const { CodexTelegramBot } = require("./bot");
 const { discoverCodexBinary } = require("./codex-binary");
 const { CodexClient } = require("./codex-client");
+const { ElevationQueue } = require("./elevation-queue");
 const { loadConfig } = require("./env");
 const { createLogger } = require("./logger");
 const { ReleaseTracker, formatReleaseEntry, recordReleaseStart } = require("./release-notes");
@@ -70,9 +71,29 @@ async function main() {
     approvalPolicy: config.codexApprovalPolicy,
     fullAccess: config.codexFullAccess,
     appToolsEnabled: config.codexAppToolsEnabled,
+    elevationMode: config.elevationMode,
+    elevationSpoolPath: config.elevationSpoolPath,
+    elevationTaskName: config.elevationTaskName,
+    elevationTimeoutMs: config.elevationTimeoutMs,
+    elevationMaxRuntimeSeconds: config.elevationMaxRuntimeSeconds,
     logger,
   });
-  bot = new CodexTelegramBot({ telegram, codex, stateStore, config, logger, releaseTracker });
+  const elevationQueue = new ElevationQueue({
+    spoolPath: config.elevationSpoolPath,
+    taskName: config.elevationTaskName,
+    timeoutMs: config.elevationTimeoutMs,
+    maxRuntimeSeconds: config.elevationMaxRuntimeSeconds,
+    logger,
+  });
+  bot = new CodexTelegramBot({
+    telegram,
+    codex,
+    stateStore,
+    config,
+    logger,
+    releaseTracker,
+    elevationQueue,
+  });
 
   await bot.initialize();
   const me = await telegram.getMe();

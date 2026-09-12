@@ -53,6 +53,7 @@ function createStateStore(overrides = {}) {
       telegramThreadTopics: {},
       unmaterializedThreadIds: [],
       pendingWriterDecisions: [],
+      pendingElevationRequests: [],
       ...overrides,
     },
     save(patch) {
@@ -523,6 +524,84 @@ test("/chats показывает выбранный свежий чат, даж
   assert.equal(stateStore.state.lastListedThreadIds[0], "new-thread");
 });
 
+test("/chats листает вперёд и назад по десять чатов", async () => {
+  const sent = [];
+  const edits = [];
+  const callbacks = [];
+  const telegram = new EventEmitter();
+  telegram.sendMessage = async (target, text, extra = {}) => {
+    sent.push({ target, text, extra });
+    return { message_id: 77 };
+  };
+  telegram.editMessage = async (target, messageId, text, extra = {}) => {
+    edits.push({ target, messageId, text, extra });
+  };
+  telegram.answerCallbackQuery = async (id, text) => callbacks.push({ id, text });
+
+  const firstPage = Array.from({ length: 10 }, (_, index) => ({
+    id: `page-1-thread-${index + 1}`,
+    name: `Первая ${index + 1}`,
+    cwd: "C:\\Project",
+  }));
+  const secondPage = Array.from({ length: 10 }, (_, index) => ({
+    id: `page-2-thread-${index + 1}`,
+    name: `Вторая ${index + 1}`,
+    cwd: "C:\\Project",
+  }));
+  const listCalls = [];
+  const codex = new EventEmitter();
+  codex.listThreads = async ({ limit, cursor }) => {
+    listCalls.push({ limit, cursor });
+    return cursor === "page-2"
+      ? { data: secondPage, nextCursor: null }
+      : { data: firstPage, nextCursor: "page-2" };
+  };
+
+  const stateStore = createStateStore({ currentThreadId: null, currentThreadName: null });
+  const bot = new CodexTelegramBot({
+    telegram,
+    codex,
+    stateStore,
+    config: { allowedUserId: 7, desktopSyncPollMs: 1000 },
+    logger: createLogger(),
+  });
+
+  await bot.handleUpdate({
+    message: { from: { id: 7 }, chat: { id: 100 }, text: "/chats" },
+  });
+  const firstKeyboard = sent[0].extra.reply_markup.inline_keyboard;
+  const nextButton = firstKeyboard.at(-1).find((button) => /Вперёд/.test(button.text));
+  assert.equal(firstKeyboard.length, 11);
+  assert.match(sent[0].text, /Страница: 1/);
+  assert.ok(nextButton);
+
+  await bot.handleUpdate({ callback_query: {
+    id: "next-page",
+    from: { id: 7 },
+    data: nextButton.callback_data,
+    message: { chat: { id: 100 }, message_id: 77 },
+  } });
+  assert.deepEqual(listCalls.at(-1), { limit: 10, cursor: "page-2" });
+  assert.match(edits.at(-1).text, /Вторая 10/);
+  assert.match(edits.at(-1).text, /Страница: 2/);
+  const secondKeyboard = edits.at(-1).extra.reply_markup.inline_keyboard;
+  const previousButton = secondKeyboard.at(-1).find((button) => /Назад/.test(button.text));
+  assert.ok(previousButton);
+  assert.equal(secondKeyboard.at(-1).some((button) => /Вперёд/.test(button.text)), false);
+
+  await bot.handleUpdate({ callback_query: {
+    id: "previous-page",
+    from: { id: 7 },
+    data: previousButton.callback_data,
+    message: { chat: { id: 100 }, message_id: 77 },
+  } });
+  assert.deepEqual(listCalls.at(-1), { limit: 10, cursor: null });
+  assert.match(edits.at(-1).text, /Первая 10/);
+  assert.match(edits.at(-1).text, /Страница: 1/);
+  assert.equal(callbacks.at(-1).text, "Страница 1");
+  bot.stop();
+});
+
 test("вопрос Codex можно полностью обработать через /answer", async () => {
   const sent = [];
   const responses = [];
@@ -917,6 +996,97 @@ test("решение ask после перезапуска создаёт коп
   assert.equal(stateStore.state.pendingWriterDecisions.length, 0);
   assert.equal(stateStore.state.currentThreadId, "thread-fork");
   assert.match(edits.at(-1).text, /Копия создана/);
+  bot.stop();
+});
+
+test("административная команда показывает точные данные и запускается только кнопкой владельца", async () => {
+  const request = {
+    id: "a".repeat(32),
+    threadId: "thread-admin",
+    command: "powercfg /requests",
+    cwd: "C:\\Windows\\System32",
+    reason: "Windows требует права администратора",
+    expiresAt: new Date(Date.now() + 60_000).toISOString(),
+  };
+  const sent = [];
+  const edits = [];
+  const callbacks = [];
+  let approved = 0;
+  let triggered = 0;
+  let completed = false;
+  const elevationQueue = {
+    hasResult() { return completed; },
+    listPendingRequests() { return completed ? [] : [request]; },
+    approve(id) {
+      assert.equal(id, request.id);
+      approved += 1;
+    },
+    deny() { completed = true; },
+    finish() { completed = true; },
+    triggerHelper() { triggered += 1; },
+  };
+  const telegram = new EventEmitter();
+  telegram.deleteWebhook = async () => {};
+  telegram.setMyCommands = async () => {};
+  telegram.sendMessage = async (target, text, extra = {}) => {
+    sent.push({ target, text, extra });
+    return { message_id: sent.length };
+  };
+  telegram.sendLongMessage = async (target, text) => {
+    sent.push({ target, text, extra: {} });
+    return [{ message_id: sent.length }];
+  };
+  telegram.editMessage = async (target, messageId, text, extra = {}) => {
+    edits.push({ target, messageId, text, extra });
+  };
+  telegram.answerCallbackQuery = async (id, text) => callbacks.push({ id, text });
+  const codex = new EventEmitter();
+  codex.ensureStarted = async () => {};
+
+  const stateStore = createStateStore({
+    currentThreadId: null,
+    currentThreadName: null,
+    lastChatId: 100,
+  });
+  const bot = new CodexTelegramBot({
+    telegram,
+    codex,
+    stateStore,
+    elevationQueue,
+    config: {
+      allowedUserId: 7,
+      desktopSyncPollMs: 1000,
+      elevationMode: "ask",
+      elevationTaskName: "Elevated Test",
+      elevationSpoolPath: "C:\\Spool",
+    },
+    logger: createLogger(),
+  });
+
+  await bot.initialize();
+  const prompt = sent.find((item) => /Требуется выполнение от администратора/.test(item.text));
+  assert.match(prompt.text, /powercfg \/requests/);
+  assert.match(prompt.text, /C:\\Windows\\System32/);
+  assert.match(prompt.text, /Windows требует права администратора/);
+  assert.equal(approved, 0);
+  assert.equal(triggered, 0);
+  assert.equal(
+    prompt.extra.reply_markup.inline_keyboard[0][0].callback_data,
+    `elevation:approve:${request.id}`,
+  );
+
+  await bot.handleUpdate({ callback_query: {
+    id: "approve-admin",
+    from: { id: 7 },
+    data: `elevation:approve:${request.id}`,
+    message: { chat: { id: 100 }, message_id: prompt.message_id },
+  } });
+
+  assert.equal(approved, 1);
+  assert.equal(triggered, 1);
+  assert.equal(stateStore.state.pendingElevationRequests[0].status, "running");
+  assert.match(edits.at(-1).text, /выполняется от администратора/);
+  assert.match(callbacks.at(-1).text, /Запускаю/);
   bot.stop();
 });
 
