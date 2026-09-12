@@ -76,7 +76,7 @@ function Invoke-ElevatedJob {
     $id = [System.IO.Path]::GetFileNameWithoutExtension($File.Name)
     try {
         if ($id -notmatch '^[a-f0-9]{32}$') { throw 'Invalid request ID.' }
-        $job = Get-Content -LiteralPath $File.FullName -Raw | ConvertFrom-Json
+        $job = Get-Content -LiteralPath $File.FullName -Raw -Encoding UTF8 | ConvertFrom-Json
         if ([string]$job.id -ne $id) { throw 'The file ID does not match the request ID.' }
         if ([string]$job.digest -ne (Get-RequestDigest -Request $job)) {
             throw 'The elevated command digest does not match.'
