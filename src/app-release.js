@@ -181,9 +181,55 @@ const RELEASE_HISTORY = [
     ],
   },
   {
-    id: "2026-08-31-configurable-outgoing-file-access",
+    id: "2026-09-07-new-thread-visibility",
     version: "0.1.17",
     sequence: 17,
+    title: "New thread visibility",
+    notes: [
+      "A newly created Telegram-selected Codex chat is kept at the top of /chats even before thread/list returns it.",
+      "Empty new chats with unavailable turn history are treated as an empty sync baseline.",
+      "Desktop answer polling no longer repeats warnings for freshly created chats without history.",
+    ],
+  },
+  {
+    id: "2026-09-07-current-thread-topic-sync",
+    version: "0.1.18",
+    sequence: 18,
+    title: "Reliable topic synchronization",
+    notes: [
+      "Topic synchronization includes the selected chat even before Codex lists its history.",
+      "The requested topic sync limit is preserved when adding the selected chat.",
+      "Rebinding a Telegram topic removes the old reverse mapping; sync also repairs stale mappings from earlier versions.",
+    ],
+  },
+  {
+    id: "2026-09-07-expanded-regression-tests",
+    version: "0.1.19",
+    sequence: 19,
+    title: "Expanded regression coverage",
+    notes: [
+      "Added 62 tests for topics, persisted recovery, authorization, Telegram API errors and binary file delivery.",
+      "Topic chat-list buttons now highlight the chat selected in that topic.",
+      "Fractional topic sync limits are normalized to integers before calling Codex.",
+      "Added npm run test:coverage for repeatable coverage reports.",
+    ],
+  },
+  {
+    id: "2026-09-08-new-chat-model-settings",
+    version: "0.1.20",
+    sequence: 20,
+    title: "Model settings before the first message",
+    notes: [
+      "Viewing /model reads thread metadata or effective configuration without resuming the chat or releasing its writer.",
+      "Model choices for empty chats survive restarts and are applied before the first message, with retry on failure.",
+      "/model list no longer requires a selected or loaded chat.",
+      "Added lifecycle regression tests across bot commands, CodexClient and persisted state.",
+    ],
+  },
+  {
+    id: "2026-09-12-configurable-outgoing-file-access",
+    version: "0.1.21",
+    sequence: 21,
     title: "Configurable full outgoing file access",
     notes: [
       "Added TELEGRAM_OUTGOING_FILE_ACCESS with off, workspace, and all modes.",

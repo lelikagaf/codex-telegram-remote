@@ -21,6 +21,7 @@ class StateStore {
       telegramTopicThreads: {},
       telegramThreadTopics: {},
       unmaterializedThreadIds: [],
+      pendingThreadModelSettings: {},
     };
   }
 

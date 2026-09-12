@@ -478,6 +478,50 @@ test("анонимный админ не запускает команды и н
   assert.deepEqual(sent, []);
 });
 
+test("/chats показывает выбранный свежий чат, даже если thread/list его не вернул", async () => {
+  const sent = [];
+  const telegram = new EventEmitter();
+  telegram.sendMessage = async (chatId, text, extra) => {
+    sent.push({ chatId, text, extra });
+    return { message_id: sent.length };
+  };
+
+  const codex = new EventEmitter();
+  codex.listThreads = async () => ({
+    data: [
+      { id: "old-1", name: "Bridge8 #2", cwd: "C:\\Users\\lelik\\Documents\\Codex" },
+      { id: "old-2", name: "Сравнить токены SOL и Astra", cwd: "C:\\Project" },
+    ],
+  });
+  codex.readThread = async (threadId) => ({
+    thread: {
+      id: threadId,
+      name: "Bridge8 UI/UX",
+      cwd: "C:\\Users\\lelik\\Documents\\Codex",
+      status: { type: "idle" },
+    },
+  });
+
+  const stateStore = createStateStore({
+    currentThreadId: "new-thread",
+    currentThreadName: "Bridge8 UI/UX",
+  });
+  const bot = new CodexTelegramBot({
+    telegram,
+    codex,
+    stateStore,
+    config: { allowedUserId: 7, desktopSyncPollMs: 1000 },
+    logger: createLogger(),
+  });
+
+  await bot.handleUpdate({
+    message: { from: { id: 7 }, chat: { id: 100 }, text: "/chats" },
+  });
+
+  assert.match(sent.at(-1).text, /● 1\. Bridge8 UI\/UX/);
+  assert.equal(stateStore.state.lastListedThreadIds[0], "new-thread");
+});
+
 test("вопрос Codex можно полностью обработать через /answer", async () => {
   const sent = [];
   const responses = [];
@@ -780,6 +824,131 @@ test("/sync_topics creates Telegram topics and stores Codex mapping", async () =
   assert.match(sent.at(-1).text, /Создано: 2/);
 });
 
+test("/new then /chats and /sync_topics keeps an unlisted chat and avoids duplicate topics", async (t) => {
+  for (const { limit, historyMissing } of [
+    { limit: 1, historyMissing: false },
+    { limit: 10, historyMissing: false },
+    { limit: 25, historyMissing: false },
+    { limit: 10, historyMissing: true },
+  ]) {
+    await t.test(`limit=${limit}, historyMissing=${historyMissing}`, async () => {
+      const sent = [];
+      const createdTopics = [];
+      const telegram = new EventEmitter();
+      telegram.sendMessage = async (target, text) => {
+        sent.push(text);
+        return { message_id: sent.length };
+      };
+      telegram.createForumTopic = async (chatId, name) => {
+        createdTopics.push({ chatId, name });
+        return { message_thread_id: 700 + createdTopics.length };
+      };
+
+      const freshThread = { id: "fresh", name: "Bridge8 UI/UX", cwd: "C:\\Project" };
+      const codex = new EventEmitter();
+      codex.startThread = async () => ({ thread: freshThread });
+      codex.listThreads = async ({ limit: requested }) => ({
+        data: Array.from({ length: requested }, (_, index) => ({
+          id: `old-${index}`, name: `Old ${index}`,
+        })),
+      });
+      codex.readThread = async (id, includeTurns) => {
+        assert.equal(id, freshThread.id);
+        assert.equal(includeTurns, false);
+        if (historyMissing) {
+          throw new Error("invalid paginated history lineage: missing source rollout");
+        }
+        return { thread: freshThread };
+      };
+      const stateStore = createStateStore();
+      const bot = new CodexTelegramBot({
+        telegram, codex, stateStore, logger: createLogger(),
+        config: { allowedUserId: 7, defaultCwd: "C:\\Project", desktopSyncPollMs: 1000 },
+      });
+      t.after(() => bot.stop());
+      const command = (text) => bot.handleUpdate({
+        message: { from: { id: 7 }, chat: { id: 100 }, text },
+      });
+
+      await command("/new Bridge8 UI/UX");
+      await command("/chats");
+      assert.match(sent.at(-1), /Bridge8 UI\/UX/);
+      const syncCommand = limit === 10 ? "/sync_topics@ocume_bot" : `/sync_topics ${limit}`;
+      await command(syncCommand);
+      assert.equal(createdTopics.length, limit);
+      assert.deepEqual(createdTopics[0], { chatId: 100, name: "Bridge8 UI/UX" });
+      assert.equal(stateStore.state.lastListedThreadIds.length, limit);
+      assert.equal(stateStore.state.lastListedThreadIds[0], "fresh");
+      assert.equal(stateStore.state.telegramTopicThreads["100:701"].threadId, "fresh");
+      assert.equal(stateStore.state.telegramThreadTopics["100:fresh"].messageThreadId, 701);
+
+      await command(syncCommand);
+      assert.equal(createdTopics.length, limit);
+      assert.match(sent.at(-1), /Создано: 0/);
+    });
+  }
+});
+
+test("/sync_topics repairs a stale reverse mapping without changing the rebound topic", async () => {
+  const createdTopics = [];
+  const telegram = new EventEmitter();
+  telegram.sendMessage = async () => ({ message_id: 1 });
+  telegram.createForumTopic = async (chatId, name) => {
+    createdTopics.push({ chatId, name });
+    return { message_thread_id: 78 };
+  };
+  const codex = new EventEmitter();
+  codex.listThreads = async () => ({ data: [
+    { id: "original", name: "Original" },
+    { id: "replacement", name: "Replacement" },
+  ] });
+  const original = { chatId: 100, messageThreadId: 77, threadId: "original" };
+  const replacement = { ...original, threadId: "replacement" };
+  const stateStore = createStateStore({
+    currentThreadId: "replacement",
+    telegramTopicThreads: { "100:77": replacement },
+    telegramThreadTopics: { "100:original": original, "100:replacement": replacement },
+  });
+  const bot = new CodexTelegramBot({
+    telegram, codex, stateStore, logger: createLogger(),
+    config: { allowedUserId: 7, desktopSyncPollMs: 1000 },
+  });
+  await bot.handleUpdate({
+    message: { from: { id: 7 }, chat: { id: 100 }, text: "/sync_topics 2" },
+  });
+  assert.deepEqual(createdTopics, [{ chatId: 100, name: "Original" }]);
+  assert.equal(stateStore.state.telegramTopicThreads["100:77"].threadId, "replacement");
+  assert.equal(stateStore.state.telegramTopicThreads["100:78"].threadId, "original");
+  assert.equal(stateStore.state.telegramThreadTopics["100:original"].messageThreadId, 78);
+});
+
+test("creating a chat in a topic removes only that topic's previous reverse mapping", async (t) => {
+  const telegram = new EventEmitter();
+  telegram.sendMessage = async () => ({ message_id: 1 });
+  const codex = new EventEmitter();
+  codex.startThread = async () => ({ thread: { id: "fresh", name: "Bridge8 UI/UX" } });
+  const original = { chatId: 100, messageThreadId: 77, threadId: "original" };
+  const otherGroup = { ...original, chatId: 200 };
+  const stateStore = createStateStore({
+    telegramTopicThreads: { "100:77": original, "200:77": otherGroup },
+    telegramThreadTopics: { "100:original": original, "200:original": otherGroup },
+  });
+  const bot = new CodexTelegramBot({
+    telegram, codex, stateStore, logger: createLogger(),
+    config: { allowedUserId: 7, desktopSyncPollMs: 1000 },
+  });
+  t.after(() => bot.stop());
+  await bot.handleUpdate({
+    message: {
+      from: { id: 7 }, chat: { id: 100 }, message_thread_id: 77, text: "/new Bridge8 UI/UX",
+    },
+  });
+  assert.equal(stateStore.state.telegramThreadTopics["100:original"], undefined);
+  assert.equal(stateStore.state.telegramTopicThreads["100:77"].threadId, "fresh");
+  assert.equal(stateStore.state.telegramThreadTopics["100:fresh"].messageThreadId, 77);
+  assert.deepEqual(stateStore.state.telegramThreadTopics["200:original"], otherGroup);
+});
+
 test("Telegram topic routes prompt and final answer to mapped Codex chat", async () => {
   const sent = [];
   const telegram = new EventEmitter();
@@ -1022,6 +1191,12 @@ test("распознаётся ошибка ещё не материализов
   assert.equal(
     isUnmaterializedThreadError(
       new Error("thread/turns/list is unavailable before first user message"),
+    ),
+    true,
+  );
+  assert.equal(
+    isUnmaterializedThreadError(
+      new Error("invalid paginated history lineage for thread-new: missing source rollout"),
     ),
     true,
   );

@@ -80,6 +80,9 @@ test("model settings are read, cached and updated through app-server", async () 
   });
   client.request = async (method, params) => {
     calls.push({ method, params });
+    if (method === "thread/read") {
+      return { thread: { model: "gpt-5.6-sol", reasoningEffort: "low" } };
+    }
     if (method === "thread/resume") {
       return { model: "gpt-5.6-sol", reasoningEffort: "low" };
     }
@@ -98,6 +101,7 @@ test("model settings are read, cached and updated through app-server", async () 
   await client.listModels({ includeHidden: true });
 
   assert.deepEqual(calls, [
+    { method: "thread/read", params: { threadId: "thread-1", includeTurns: false } },
     { method: "thread/resume", params: { threadId: "thread-1" } },
     {
       method: "thread/settings/update",
