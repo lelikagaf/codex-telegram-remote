@@ -262,6 +262,17 @@ const RELEASE_HISTORY = [
       "/chats now shows ten chats per page with Back and Next buttons while keeping /use scoped to the visible page.",
     ],
   },
+  {
+    id: "2026-09-14-codex-limits-command",
+    version: "0.1.24",
+    sequence: 24,
+    title: "Codex usage limits in Telegram",
+    notes: [
+      "Added /limits to the Telegram quick-command menu.",
+      "The command reads the current account limit windows directly from Codex app-server.",
+      "Limit usage, remaining percentage, reset time, plan and credits are formatted for Telegram.",
+    ],
+  },
 ];
 
 const CURRENT_RELEASE = RELEASE_HISTORY.at(-1);

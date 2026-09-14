@@ -43,6 +43,7 @@ const HELP_TEXT = [
   "/new Название — создать новый чат",
   "/sync_topics — создать темы Telegram по чатам Codex",
   "/model — модель и усилие рассуждений",
+  "/limits — текущие лимиты Codex",
   "/access — режим доступа Telegram → Codex",
   "/status — состояние текущей задачи",
   "/stop — остановить текущую задачу",
@@ -74,6 +75,105 @@ function extractAgentText(item) {
 
 function isAgentMessage(item) {
   return item?.type === "agentMessage" || item?.type === "agent_message";
+}
+
+function valueFrom(object, camelName, snakeName) {
+  return object?.[camelName] ?? object?.[snakeName] ?? null;
+}
+
+function formatPercent(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return "неизвестно";
+  return new Intl.NumberFormat("ru-RU", { maximumFractionDigits: 1 }).format(number);
+}
+
+function formatRateLimitDuration(minutes) {
+  const value = Number(minutes);
+  if (!Number.isFinite(value) || value <= 0) return "окно";
+  if (value % 10080 === 0) return `${value / 10080} нед.`;
+  if (value % 1440 === 0) return `${value / 1440} дн.`;
+  if (value % 60 === 0) return `${value / 60} ч`;
+  return `${value} мин`;
+}
+
+function formatRateLimitReset(value) {
+  const timestamp = Number(value);
+  if (!Number.isFinite(timestamp) || timestamp <= 0) return "время сброса неизвестно";
+  const milliseconds = timestamp > 10_000_000_000 ? timestamp : timestamp * 1000;
+  const date = new Date(milliseconds);
+  if (Number.isNaN(date.getTime())) return "время сброса неизвестно";
+  return `сброс ${date.toLocaleString("ru-RU", {
+    day: "2-digit",
+    month: "short",
+    year: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  })}`;
+}
+
+function formatRateLimitWindow(window) {
+  if (!window) return null;
+  const used = Number(valueFrom(window, "usedPercent", "used_percent"));
+  if (!Number.isFinite(used)) return null;
+  const remaining = Math.max(0, Math.min(100, 100 - used));
+  const duration = valueFrom(window, "windowDurationMins", "window_minutes");
+  const resetsAt = valueFrom(window, "resetsAt", "resets_at");
+  return `${formatRateLimitDuration(duration)}: использовано ${formatPercent(used)}%, осталось ${formatPercent(remaining)}%, ${formatRateLimitReset(resetsAt)}`;
+}
+
+function formatRateLimitSnapshot(snapshot, fallbackName = null) {
+  if (!snapshot) return [];
+  const limitId = valueFrom(snapshot, "limitId", "limit_id") || fallbackName;
+  const limitName = valueFrom(snapshot, "limitName", "limit_name");
+  const model = valueFrom(snapshot, "normalModelSlug", "normal_model_slug");
+  const title = limitName || (limitId === "codex" ? "Codex" : limitId) || "Основной лимит";
+  const details = [title];
+  if (model) details.push(`Модель: ${model}`);
+  const primary = formatRateLimitWindow(snapshot.primary);
+  const secondary = formatRateLimitWindow(snapshot.secondary);
+  if (primary) details.push(`• ${primary}`);
+  if (secondary) details.push(`• ${secondary}`);
+  const credits = snapshot.credits;
+  if (credits) {
+    const unlimited = Boolean(credits.unlimited);
+    const hasCredits = Boolean(valueFrom(credits, "hasCredits", "has_credits"));
+    const balance = credits.balance;
+    details.push(
+      unlimited
+        ? "Кредиты: безлимитные"
+        : hasCredits
+          ? `Кредиты: ${balance ?? "доступны"}`
+          : "Кредиты: нет",
+    );
+  }
+  if (!primary && !secondary) details.push("• Данные об окнах лимита не получены");
+  return details;
+}
+
+function formatAccountRateLimits(result) {
+  const fallback = result?.rateLimits || result?.rate_limits || null;
+  const byId = result?.rateLimitsByLimitId || result?.rate_limits_by_limit_id || null;
+  const snapshots = byId && typeof byId === "object"
+    ? Object.entries(byId).filter(([, snapshot]) => snapshot)
+    : [];
+  if (!snapshots.length && fallback) {
+    snapshots.push([valueFrom(fallback, "limitId", "limit_id") || "codex", fallback]);
+  }
+
+  const lines = ["Лимиты Codex"];
+  const planType = valueFrom(fallback, "planType", "plan_type")
+    || snapshots.map(([, snapshot]) => valueFrom(snapshot, "planType", "plan_type")).find(Boolean);
+  if (planType) lines.push(`Тариф: ${String(planType).toUpperCase()}`);
+  const ordinaryUsageAllowed = valueFrom(result, "ordinaryUsageAllowed", "ordinary_usage_allowed");
+  if (ordinaryUsageAllowed === false) lines.push("⚠️ Обычный включённый лимит сейчас недоступен.");
+  else if (ordinaryUsageAllowed === true) lines.push("Обычный включённый лимит: доступен");
+
+  for (const [limitId, snapshot] of snapshots) {
+    if (lines.length > 1) lines.push("");
+    lines.push(...formatRateLimitSnapshot(snapshot, limitId));
+  }
+  if (!snapshots.length) lines.push("Codex не вернул данные о текущих лимитах.");
+  return lines.join("\n");
 }
 
 function isUserMessage(item) {
@@ -623,6 +723,7 @@ class CodexTelegramBot {
       { command: "new", description: "Создать новый чат" },
       { command: "sync_topics", description: "Создать темы Telegram по чатам Codex" },
       { command: "model", description: "Модель и усилие рассуждений" },
+      { command: "limits", description: "Текущие лимиты Codex" },
       { command: "access", description: "Режим доступа к Codex" },
       { command: "status", description: "Статус задачи" },
       { command: "stop", description: "Остановить задачу" },
@@ -1290,6 +1391,15 @@ class CodexTelegramBot {
               "Повторите команду после устранения указанной ошибки.",
             ].join("\n"),
           );
+        }
+        break;
+      case "/limits":
+        try {
+          const limits = await this.codex.getAccountRateLimits();
+          await this.telegram.sendMessage(target, formatAccountRateLimits(limits));
+        } catch (error) {
+          this.logger.warn("Не удалось прочитать лимиты Codex", error.message);
+          await this.telegram.sendMessage(target, `❌ Не удалось прочитать лимиты Codex: ${error.message}`);
         }
         break;
       case "/access":
@@ -3006,6 +3116,7 @@ module.exports = {
   collectOutgoingTelegramFiles,
   extractLocalFilePathCandidates,
   formatFileSizeLimit,
+  formatAccountRateLimits,
   formatModelList,
   formatModelSettings,
   formatTelegramTurnResult,

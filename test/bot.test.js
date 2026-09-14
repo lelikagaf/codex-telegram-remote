@@ -13,6 +13,7 @@ const {
   extractTurnAnswer,
   extractTurnUserMessages,
   extractTurnUserText,
+  formatAccountRateLimits,
   formatModelList,
   formatModelSettings,
   formatTelegramTurnResult,
@@ -368,6 +369,7 @@ test("команда /model добавлена в меню быстрых ком
   bot.stop();
 
   assert.equal(commands.some((item) => item.command === "model"), true);
+  assert.equal(commands.some((item) => item.command === "limits"), true);
   assert.equal(commands.some((item) => item.command === "access"), true);
   assert.equal(commands.some((item) => item.command === "answer"), true);
   assert.equal(commands.some((item) => item.command === "unlock"), true);
@@ -522,6 +524,53 @@ test("/chats показывает выбранный свежий чат, даж
 
   assert.match(sent.at(-1).text, /● 1\. Bridge8 UI\/UX/);
   assert.equal(stateStore.state.lastListedThreadIds[0], "new-thread");
+});
+
+test("лимиты Codex форматируются с остатком и временем сброса", () => {
+  const text = formatAccountRateLimits({
+    ordinaryUsageAllowed: true,
+    rateLimits: {
+      limitId: "codex",
+      planType: "pro",
+      primary: { usedPercent: 12.5, windowDurationMins: 300, resetsAt: 1_800_000_000 },
+      secondary: { usedPercent: 40, windowDurationMins: 10080, resetsAt: 1_800_500_000 },
+      credits: { hasCredits: false, unlimited: false, balance: null },
+    },
+  });
+
+  assert.match(text, /Лимиты Codex/);
+  assert.match(text, /Тариф: PRO/);
+  assert.match(text, /5 ч: использовано 12,5%, осталось 87,5%/);
+  assert.match(text, /1 нед\.: использовано 40%, осталось 60%/);
+  assert.match(text, /сброс/);
+  assert.match(text, /Кредиты: нет/);
+});
+
+test("команда /limits запрашивает и отправляет текущие лимиты", async () => {
+  const sent = [];
+  const telegram = new EventEmitter();
+  telegram.sendMessage = async (chatId, text) => sent.push({ chatId, text });
+  const codex = new EventEmitter();
+  codex.getAccountRateLimits = async () => ({
+    rateLimits: {
+      limitId: "codex",
+      primary: { usedPercent: 25, windowDurationMins: 300, resetsAt: null },
+    },
+  });
+  const bot = new CodexTelegramBot({
+    telegram,
+    codex,
+    stateStore: createStateStore(),
+    config: { allowedUserId: 7, desktopSyncPollMs: 1000 },
+    logger: createLogger(),
+  });
+
+  await bot.handleUpdate({
+    message: { from: { id: 7 }, chat: { id: 100 }, text: "/limits" },
+  });
+
+  assert.equal(sent.length, 1);
+  assert.match(sent[0].text, /использовано 25%, осталось 75%/);
 });
 
 test("/chats листает вперёд и назад по десять чатов", async () => {

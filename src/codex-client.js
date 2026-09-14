@@ -450,6 +450,12 @@ class CodexClient extends EventEmitter {
     return this.request("model/list", { includeHidden });
   }
 
+  getAccountRateLimits() {
+    return this.request("account/rateLimits/read", {
+      excludeResetCreditDetails: true,
+    });
+  }
+
   async getThreadModelSettings(threadId) {
     const cached = this.loadedThreads.has(threadId) && this.threadModelSettings.get(threadId);
     if (cached?.model) return { ...cached };

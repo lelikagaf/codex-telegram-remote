@@ -254,6 +254,27 @@ test("chat tools bridge can be switched on for old and new chats", async () => {
   }
 });
 
+test("account rate limits are read through app-server", async () => {
+  const client = new CodexClient({
+    launch: {},
+    cwd: "C:\\Project",
+    logger: { info() {}, debug() {}, warn() {}, error() {} },
+  });
+  let captured;
+  client.request = async (method, params) => {
+    captured = { method, params };
+    return { rateLimits: { limitId: "codex" } };
+  };
+
+  const result = await client.getAccountRateLimits();
+
+  assert.deepEqual(captured, {
+    method: "account/rateLimits/read",
+    params: { excludeResetCreditDetails: true },
+  });
+  assert.equal(result.rateLimits.limitId, "codex");
+});
+
 test("elevation bridge is attached to old and new chats and described in turn context", async () => {
   const launch = { command: "C:\\Codex\\codex.exe", argsPrefix: [] };
   const overrides = buildToolOverrides({
