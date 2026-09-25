@@ -2,6 +2,7 @@ const { EventEmitter } = require("node:events");
 const { spawn } = require("node:child_process");
 const path = require("node:path");
 const readline = require("node:readline");
+const { missingRuntimeFiles } = require("./codex-binary");
 
 const CHAT_TOOLS_SERVER_NAME = "codex_telegram_chats";
 const ELEVATION_TOOLS_SERVER_NAME = "codex_telegram_elevation";
@@ -28,6 +29,7 @@ function buildToolOverrides({
         CODEX_CHAT_BRIDGE_ARGS: JSON.stringify(launch.argsPrefix || []),
         CODEX_CHAT_BRIDGE_CWD: cwd,
         CODEX_CHAT_BRIDGE_FULL_ACCESS: fullAccess ? "true" : "false",
+        CODEX_CHAT_BRIDGE_AUTO_DISCOVER: ["Codex Desktop", "npm fallback"].includes(launch.source) ? "true" : "false",
       },
       startup_timeout_sec: 30,
       tool_timeout_sec: 120,
@@ -92,6 +94,8 @@ class CodexRpcError extends Error {
 class CodexClient extends EventEmitter {
   constructor({
     launch,
+    resolveLaunch = null,
+    spawnProcess = spawn,
     cwd,
     approvalPolicy = "never",
     fullAccess = false,
@@ -105,6 +109,8 @@ class CodexClient extends EventEmitter {
   }) {
     super();
     this.launch = launch;
+    this.resolveLaunch = resolveLaunch;
+    this.spawnProcess = spawnProcess;
     this.cwd = cwd;
     this.approvalPolicy = approvalPolicy;
     this.fullAccess = fullAccess;
@@ -120,6 +126,9 @@ class CodexClient extends EventEmitter {
     this.pending = new Map();
     this.nextId = 1;
     this.startPromise = null;
+    this.runtimeReadyPromise = null;
+    this.activeTurnThreads = new Set();
+    this.runtimeThreadSettings = new Map();
     this.loadedThreads = new Set();
     this.threadModelSettings = new Map();
   }
@@ -129,15 +138,51 @@ class CodexClient extends EventEmitter {
   }
 
   async ensureStarted() {
-    if (this.isRunning) return;
     if (this.startPromise) return this.startPromise;
-    this.startPromise = this.#start().finally(() => {
+    if (this.isRunning) return;
+    this.startPromise = this.#start().catch((error) => {
+      this.stop();
+      throw error;
+    }).finally(() => {
       this.startPromise = null;
     });
     return this.startPromise;
   }
 
+  async ensureRuntimeReady() {
+    if (!this.resolveLaunch) return;
+    if (this.runtimeReadyPromise) return this.runtimeReadyPromise;
+    this.runtimeReadyPromise = (async () => {
+      if (this.startPromise) await this.startPromise;
+      const missing = missingRuntimeFiles(this.launch);
+      if (this.isRunning && missing.length) {
+        // Never kill an active turn or replay a potentially executed user request.
+        while (this.pending.size && !this.activeTurnThreads.size) {
+          await Promise.allSettled([...this.pending.values()].map((item) => item.promise));
+        }
+        if (this.activeTurnThreads.size) {
+          throw new Error("Комплект Codex обновляется, но ещё есть выполняющаяся задача. Дождитесь её завершения и повторите сообщение.");
+        }
+        this.logger.warn("Комплект Codex исчез после обновления; переключаю runtime", { missing });
+        for (const [id, settings] of this.threadModelSettings) {
+          this.runtimeThreadSettings.set(id, settings);
+        }
+        this.stop();
+        this.emit("runtimeChanged");
+      }
+      await this.ensureStarted();
+    })().finally(() => { this.runtimeReadyPromise = null; });
+    return this.runtimeReadyPromise;
+  }
+
   async #start() {
+    if (this.resolveLaunch) {
+      const launch = await this.resolveLaunch();
+      const missing = missingRuntimeFiles(launch);
+      if (missing.length) throw new Error(`Неполный комплект Codex: отсутствует ${missing.join(", ")}`);
+      if (launch.command !== this.launch.command) this.emit("runtimeChanged");
+      this.launch = launch;
+    }
     this.logger.info("Запуск Codex app-server", {
       version: this.launch.version.raw,
       cwd: this.cwd,
@@ -147,7 +192,7 @@ class CodexClient extends EventEmitter {
       elevationMode: this.elevationMode,
     });
     this.loadedThreads.clear();
-    this.child = spawn(
+    const child = this.spawnProcess(
       this.launch.command,
       buildCodexAppServerArgs({
         argsPrefix: this.launch.argsPrefix,
@@ -162,18 +207,20 @@ class CodexClient extends EventEmitter {
         stdio: ["pipe", "pipe", "pipe"],
       },
     );
-
-    this.child.on("error", (error) => this.#handleExit(error));
-    this.child.on("exit", (code, signal) => {
-      this.#handleExit(new Error(`Codex app-server завершён: code=${code}, signal=${signal}`));
+    this.child = child;
+    child.on("error", (error) => this.#handleExit(error, child));
+    child.on("exit", (code, signal) => {
+      this.#handleExit(new Error(`Codex app-server завершён: code=${code}, signal=${signal}`), child);
     });
-    this.child.stderr.on("data", (chunk) => {
+    child.stderr.on("data", (chunk) => {
       const line = String(chunk).trim();
       if (line) this.logger.debug("Codex stderr", line.slice(0, 2000));
     });
 
-    this.lineReader = readline.createInterface({ input: this.child.stdout });
-    this.lineReader.on("line", (line) => this.#handleLine(line));
+    this.lineReader = readline.createInterface({ input: child.stdout });
+    this.lineReader.on("line", (line) => {
+      if (this.child === child) this.#handleLine(line);
+    });
 
     await this.request(
       "initialize",
@@ -195,12 +242,15 @@ class CodexClient extends EventEmitter {
     this.emit("ready");
   }
 
-  #handleExit(error) {
-    if (!this.child && !this.pending.size) return;
+  #handleExit(error, child) {
+    if (this.child !== child) return;
     const pending = [...this.pending.values()];
     this.pending.clear();
     this.loadedThreads.clear();
     this.threadModelSettings.clear();
+    this.activeTurnThreads.clear();
+    this.lineReader?.close();
+    this.lineReader = null;
     this.child = null;
     for (const item of pending) {
       clearTimeout(item.timer);
@@ -243,6 +293,13 @@ class CodexClient extends EventEmitter {
       }
     }
 
+    if (message.method === "turn/started" && message.params?.threadId) {
+      this.activeTurnThreads.add(message.params.threadId);
+    }
+    if (message.method === "turn/completed") {
+      this.activeTurnThreads.delete(message.params?.threadId);
+    }
+
     if (message.method) this.emit("notification", message);
   }
 
@@ -256,7 +313,7 @@ class CodexClient extends EventEmitter {
   async request(method, params = {}, timeoutMs = 60000, options = {}) {
     if (!options.skipEnsure) await this.ensureStarted();
     const id = this.nextId++;
-    return new Promise((resolve, reject) => {
+    const promise = new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(id);
         reject(new Error(`Тайм-аут Codex RPC: ${method}`));
@@ -270,6 +327,9 @@ class CodexClient extends EventEmitter {
         reject(error);
       }
     });
+    const pending = this.pending.get(id);
+    if (pending) pending.promise = promise;
+    return promise;
   }
 
   notify(method, params = {}) {
@@ -340,6 +400,7 @@ class CodexClient extends EventEmitter {
   }
 
   async resumeThread(threadId) {
+    await this.ensureRuntimeReady();
     if (this.loadedThreads.has(threadId)) {
       return this.threadModelSettings.get(threadId) || null;
     }
@@ -362,16 +423,28 @@ class CodexClient extends EventEmitter {
       { threadId, ...accessOverrides, ...appToolsOverrides },
       120000,
     );
-    this.loadedThreads.add(threadId);
-    const settings = {
+    let settings = {
       model: result.model,
       reasoningEffort: result.reasoningEffort ?? null,
     };
+    if (result.thread?.status?.type === "active") this.activeTurnThreads.add(threadId);
+    const saved = this.runtimeThreadSettings.get(threadId);
+    if (saved) {
+      await this.request("thread/settings/update", {
+        threadId,
+        ...(saved.model ? { model: saved.model } : {}),
+        ...(saved.reasoningEffort ? { effort: saved.reasoningEffort } : {}),
+      });
+      settings = { ...saved };
+      this.runtimeThreadSettings.delete(threadId);
+    }
+    this.loadedThreads.add(threadId);
     this.threadModelSettings.set(threadId, settings);
     return settings;
   }
 
   async startThread({ cwd, name = null }) {
+    await this.ensureRuntimeReady();
     const accessOverrides = this.fullAccess
       ? { approvalPolicy: "never", sandbox: "danger-full-access" }
       : {};
@@ -410,6 +483,7 @@ class CodexClient extends EventEmitter {
   }
 
   async forkThread(threadId, { name = null } = {}) {
+    await this.ensureRuntimeReady();
     const accessOverrides = this.fullAccess
       ? { approvalPolicy: "never", sandbox: "danger-full-access" }
       : {};
@@ -493,7 +567,8 @@ class CodexClient extends EventEmitter {
     return { ...settings };
   }
 
-  startTurn(threadId, text) {
+  async startTurn(threadId, text) {
+    if (this.resolveLaunch) await this.resumeThread(threadId);
     const accessOverrides = this.fullAccess
       ? {
           approvalPolicy: "never",
@@ -525,16 +600,22 @@ class CodexClient extends EventEmitter {
           },
         }
       : {};
-    return this.request(
-      "turn/start",
-      {
-        threadId,
-        input: [{ type: "text", text }],
-        ...accessOverrides,
-        ...appContext,
-      },
-      120000,
-    );
+    this.activeTurnThreads.add(threadId);
+    try {
+      return await this.request(
+        "turn/start",
+        {
+          threadId,
+          input: [{ type: "text", text }],
+          ...accessOverrides,
+          ...appContext,
+        },
+        120000,
+      );
+    } catch (error) {
+      if (error instanceof CodexRpcError) this.activeTurnThreads.delete(threadId);
+      throw error;
+    }
   }
 
   async unsubscribeThread(threadId) {
@@ -572,6 +653,14 @@ class CodexClient extends EventEmitter {
     this.child = null;
     this.loadedThreads.clear();
     this.threadModelSettings.clear();
+    this.activeTurnThreads.clear();
+    this.lineReader?.close();
+    this.lineReader = null;
+    for (const item of this.pending.values()) {
+      clearTimeout(item.timer);
+      item.reject(new Error("Codex app-server остановлен"));
+    }
+    this.pending.clear();
     if (child && !child.killed) child.kill();
   }
 }

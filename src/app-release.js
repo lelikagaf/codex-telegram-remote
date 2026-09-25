@@ -273,6 +273,18 @@ const RELEASE_HISTORY = [
       "Limit usage, remaining percentage, reset time, plan and credits are formatted for Telegram.",
     ],
   },
+  {
+    id: "2026-09-25-runtime-recovery",
+    version: "0.1.27",
+    sequence: 27,
+    title: "Recover Codex tools after Desktop updates",
+    notes: [
+      "Recheck the executable and code-mode host before new work; rediscover complete runtimes on every app-server launch.",
+      "Replace stale idle runtimes automatically while retaining conversation bindings and model choices; never replay a submitted turn.",
+      "Do not interrupt active tasks during runtime replacement; incomplete or explicitly pinned missing installations return an actionable error.",
+      "Guard initialization and delayed process-exit races, and add regression tests for runtime updates and empty Telegram topics.",
+    ],
+  },
 ];
 
 const CURRENT_RELEASE = RELEASE_HISTORY.at(-1);

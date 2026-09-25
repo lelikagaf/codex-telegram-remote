@@ -29,6 +29,23 @@ function executableCandidate(filePath, source) {
   return { command: filePath, argsPrefix: [], source };
 }
 
+function missingRuntimeFiles(launch) {
+  const files = [launch.command];
+  if (path.basename(launch.command).toLowerCase() === "codex.exe") {
+    files.push(path.join(path.dirname(launch.command), "codex-code-mode-host.exe"));
+  }
+  if (launch.source === "npm fallback") files.push(launch.argsPrefix[0]);
+  return files.filter((file) => {
+    try { return !fs.statSync(file).isFile(); } catch { return true; }
+  });
+}
+
+function selectCodexCandidate(candidates) {
+  return candidates
+    .filter((candidate) => candidate && candidate.codeModeHostAvailable !== false)
+    .sort((a, b) => compareCandidates(b, a))[0] || null;
+}
+
 function inspectCandidate(candidate) {
   const result = spawnSync(candidate.command, [...candidate.argsPrefix, "--version"], {
     encoding: "utf8",
@@ -65,6 +82,8 @@ function discoverCodexBinary({ explicitPath = null, logger = console } = {}) {
     }
     const inspected = inspectCandidate(executableCandidate(explicitPath, "CODEX_BINARY"));
     if (!inspected) throw new Error(`Не удалось запустить CODEX_BINARY: ${explicitPath}`);
+    const missing = missingRuntimeFiles(inspected);
+    if (missing.length) throw new Error(`Неполный комплект CODEX_BINARY: отсутствует ${missing.join(", ")}`);
     return inspected;
   }
 
@@ -97,14 +116,13 @@ function discoverCodexBinary({ explicitPath = null, logger = console } = {}) {
   }
 
   const inspected = candidates.map(inspectCandidate).filter(Boolean);
-  if (!inspected.length) {
+  const selected = selectCodexCandidate(inspected.filter((item) => !missingRuntimeFiles(item).length));
+  if (!selected) {
     throw new Error(
-      "Не найден рабочий Codex Desktop. При необходимости укажите полный путь в CODEX_BINARY.",
+      "Не найден полный рабочий комплект Codex (codex.exe и codex-code-mode-host.exe). Дождитесь завершения обновления Codex и повторите команду.",
     );
   }
 
-  inspected.sort((a, b) => compareCandidates(b, a));
-  const selected = inspected[0];
   logger.info("Выбран бинарник Codex", {
     source: selected.source,
     version: selected.version.raw,
@@ -114,4 +132,4 @@ function discoverCodexBinary({ explicitPath = null, logger = console } = {}) {
   return selected;
 }
 
-module.exports = { compareCandidates, compareVersions, discoverCodexBinary, parseVersion };
+module.exports = { compareCandidates, compareVersions, discoverCodexBinary, missingRuntimeFiles, parseVersion, selectCodexCandidate };

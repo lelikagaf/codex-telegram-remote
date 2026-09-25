@@ -695,6 +695,9 @@ class CodexTelegramBot {
     this.codex.on("disconnected", (error) => {
       this.#onCodexDisconnected(error).catch(() => {});
     });
+    this.codex.on("runtimeChanged", () => {
+      this.runtimeNewThreadIds.clear();
+    });
     this.telegram.on("reconnected", ({ gapMs }) => {
       this.#onTelegramReconnected(gapMs).catch(() => {});
     });
@@ -2560,6 +2563,13 @@ class CodexTelegramBot {
       return false;
     }
 
+    try {
+      await this.codex.ensureRuntimeReady?.();
+    } catch (error) {
+      this.logger.warn("Codex не готов принять новую задачу", { threadId, message: error.message });
+      await this.telegram.sendMessage(target, `Не удалось подготовить Codex: ${error.message}\nСообщение не передано в обработку.`);
+      return false;
+    }
     let isUnmaterialized = this.unmaterializedThreadIds.has(threadId);
     if (isUnmaterialized && !this.runtimeNewThreadIds.has(threadId)) {
       threadId = await this.#recreateUnmaterializedThread(target, threadId);

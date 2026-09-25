@@ -54,7 +54,8 @@ async function main() {
     return;
   }
 
-  const launch = discoverCodexBinary({ explicitPath: config.codexBinary, logger });
+  const resolveLaunch = () => discoverCodexBinary({ explicitPath: config.codexBinary, logger });
+  const launch = resolveLaunch();
   const release = recordReleaseStart({
     logPath: config.releaseLogPath,
     codexVersion: launch.version.raw,
@@ -67,6 +68,7 @@ async function main() {
   });
   codex = new CodexClient({
     launch,
+    resolveLaunch,
     cwd: config.defaultCwd,
     approvalPolicy: config.codexApprovalPolicy,
     fullAccess: config.codexFullAccess,
@@ -97,12 +99,12 @@ async function main() {
 
   await bot.initialize();
   const me = await telegram.getMe();
-  logger.info("Telegram-бот запущен", { username: me.username, codexVersion: launch.version.raw });
+  logger.info("Telegram-бот запущен", { username: me.username, codexVersion: codex.launch.version.raw });
 
   if (config.notifyOnStart && stateStore.state.lastChatId) {
     await telegram.sendMessage(
       stateStore.state.lastChatId,
-      `🟢 Бот запущен. Codex ${launch.version.raw} готов к работе.`,
+      `🟢 Бот запущен. Codex ${codex.launch.version.raw} готов к работе.`,
     );
   }
 

@@ -4,6 +4,7 @@
 const crypto = require("node:crypto");
 const readline = require("node:readline");
 const { CodexClient } = require("../src/codex-client");
+const { discoverCodexBinary } = require("../src/codex-binary");
 
 const SERVER_INFO = { name: "codex-telegram-chats", version: "0.1.0" };
 const MAX_TEXT_LENGTH = 12_000;
@@ -152,6 +153,9 @@ function createBridgeClient() {
   }
   return new CodexClient({
     launch: { command, argsPrefix, version: { raw: "chat-bridge" } },
+    resolveLaunch: process.env.CODEX_CHAT_BRIDGE_AUTO_DISCOVER === "true"
+      ? () => discoverCodexBinary({ logger: { info() {} } })
+      : null,
     cwd: process.env.CODEX_CHAT_BRIDGE_CWD || process.cwd(),
     approvalPolicy: "never",
     fullAccess: /^(1|true|yes|on)$/i.test(process.env.CODEX_CHAT_BRIDGE_FULL_ACCESS || ""),

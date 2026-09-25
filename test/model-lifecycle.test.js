@@ -112,6 +112,57 @@ async function waitFor(predicate) {
   assert.fail("Expected bot action did not finish");
 }
 
+test("runtime change recreates an empty topic and keeps its pending model choice", async (t) => {
+  const h = setup(t);
+  h.select({ materialized: true });
+  await h.command("/new Runtime draft", 77);
+  const oldId = h.store.state.currentThreadId;
+  await h.command("/model model-b high", 77);
+  let first = true;
+  h.codex.ensureRuntimeReady = async () => {
+    if (!first) return;
+    first = false;
+    h.records.get(oldId).loaded = false;
+    h.codex.loadedThreads.clear();
+    h.codex.emit("runtimeChanged");
+  };
+  await h.command("First message after update", 77);
+  await waitFor(() => h.turnAttempts.length === 1);
+  const newId = h.store.state.currentThreadId;
+  assert.notEqual(newId, oldId);
+  assert.equal(h.store.state.telegramTopicThreads["100:77"].threadId, newId);
+  assert.deepEqual(h.turnAttempts[0], { threadId: newId, model: "model-b", effort: "high" });
+  assert.equal(h.records.get(oldId).materialized, false);
+});
+
+test("runtime change keeps an existing conversation in the same Telegram topic", async (t) => {
+  const h = setup(t);
+  const record = h.select({ id: "existing", materialized: true });
+  let first = true;
+  h.codex.ensureRuntimeReady = async () => {
+    if (!first) return;
+    first = false;
+    h.codex.loadedThreads.clear();
+    h.codex.emit("runtimeChanged");
+  };
+  await h.command("Continue after update", 77);
+  await waitFor(() => h.turnAttempts.length === 1);
+  assert.equal(h.store.state.currentThreadId, record.id);
+  assert.equal(h.store.state.telegramTopicThreads["100:77"].threadId, record.id);
+  assert.equal(h.calls.some((c) => c.method === "thread/start" || c.method === "thread/fork"), false);
+});
+
+test("failed runtime preflight does not create a replacement chat or submit the message", async (t) => {
+  const h = setup(t);
+  h.select();
+  h.codex.ensureRuntimeReady = async () => { throw new Error("Runtime unavailable during update"); };
+  await h.command("Continue after update", 77);
+  await waitFor(() => h.sent.some((item) => /Runtime unavailable/.test(item.text)));
+  assert.equal(h.turnAttempts.length, 0);
+  assert.equal(h.store.state.currentThreadId, "orphan");
+  assert.equal(h.calls.some((c) => c.method === "thread/start"), false);
+});
+
 for (const command of ["/model", "/model@ocume_bot", "/model status"]) {
   test(`${command} works in an orphaned new topic without a resume or unsubscribe`, async (t) => {
     const h = setup(t);
