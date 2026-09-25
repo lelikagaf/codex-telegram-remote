@@ -274,6 +274,30 @@ const RELEASE_HISTORY = [
     ],
   },
   {
+    id: "2026-09-25-configurable-deletion-bridge",
+    version: "0.1.25",
+    sequence: 25,
+    title: "Configurable local and SSH deletion",
+    notes: [
+      "Added CODEX_DELETION_ACCESS with off, local and all modes.",
+      "Explicit deletion requests can remove exact local paths and, in all mode, exact paths on SSH servers.",
+      "The dedicated deletion tools verify targets and results while rejecting filesystem roots and broad protected roots.",
+      "/access and /status now show the effective deletion mode.",
+    ],
+  },
+  {
+    id: "2026-09-25-persistent-prompt-queue-controls",
+    version: "0.1.26",
+    sequence: 26,
+    title: "Persistent Telegram prompt queue controls",
+    notes: [
+      "Messages sent during an active Telegram task now show controls for steering, waiting, prioritizing, editing, or deleting the queued message.",
+      "Added /queue with ten entries per page and inline controls for every queued message.",
+      "The prompt queue and pending edits survive bot restarts.",
+      "Moving one message to the front preserves the relative order of every other queued message.",
+    ],
+  },
+  {
     id: "2026-09-25-runtime-recovery",
     version: "0.1.27",
     sequence: 27,
@@ -283,6 +307,8 @@ const RELEASE_HISTORY = [
       "Replace stale idle runtimes automatically while retaining conversation bindings and model choices; never replay a submitted turn.",
       "Do not interrupt active tasks during runtime replacement; incomplete or explicitly pinned missing installations return an actionable error.",
       "Guard initialization and delayed process-exit races, and add regression tests for runtime updates and empty Telegram topics.",
+      "Retain queued prompts during runtime outages without duplicate warnings; strengthen deletion path validation and respect permission denials.",
+      "Persist a dispatch marker before submitting queued work; ambiguous results require an explicit owner retry instead of automatic replay after a crash.",
     ],
   },
 ];

@@ -24,6 +24,8 @@ class StateStore {
       pendingThreadModelSettings: {},
       pendingWriterDecisions: [],
       pendingElevationRequests: [],
+      pendingPromptQueue: [],
+      pendingQueueEdits: [],
     };
   }
 

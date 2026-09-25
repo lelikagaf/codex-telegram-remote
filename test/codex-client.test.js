@@ -2,6 +2,7 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const {
   CHAT_TOOLS_SERVER_NAME,
+  DELETION_TOOLS_SERVER_NAME,
   ELEVATION_TOOLS_SERVER_NAME,
   CodexClient,
   buildChatToolsOverrides,
@@ -317,6 +318,55 @@ test("elevation bridge is attached to old and new chats and described in turn co
   assert.match(
     calls[2].params.additionalContext["codex-telegram-remote"].value,
     /run_windows_command_as_administrator/,
+  );
+});
+
+test("deletion bridge is attached to every Telegram chat with automatic approval", async () => {
+  const launch = { command: "C:\\Codex\\codex.exe", argsPrefix: [] };
+  const overrides = buildToolOverrides({
+    enabled: false,
+    launch,
+    cwd: "C:\\Project",
+    deletionAccess: "all",
+    deletionMaxRuntimeSeconds: 900,
+  });
+  const server = overrides.config.mcp_servers[DELETION_TOOLS_SERVER_NAME];
+  assert.match(server.args[0], /codex-deletion-mcp\.js$/);
+  assert.equal(server.env.CODEX_DELETION_ACCESS, "all");
+  assert.equal(server.env.CODEX_DELETION_MAX_RUNTIME_SECONDS, "900");
+  assert.equal(server.default_tools_approval_mode, "approve");
+  assert.equal(server.tools.delete_local_paths.approval_mode, "approve");
+  assert.equal(server.tools.delete_ssh_paths.approval_mode, "approve");
+
+  const calls = [];
+  const client = new CodexClient({
+    launch,
+    cwd: "C:\\Project",
+    deletionAccess: "all",
+    logger: { info() {}, debug() {}, warn() {}, error() {} },
+  });
+  client.request = async (method, params) => {
+    calls.push({ method, params });
+    if (method === "thread/start") return { thread: { id: "new" } };
+    if (method === "thread/resume") return {};
+    if (method === "thread/fork") return { thread: { id: "fork" } };
+    return { turn: { id: "turn-1" } };
+  };
+  await client.startThread({ cwd: "C:\\Project" });
+  await client.resumeThread("old");
+  await client.forkThread("source");
+  await client.startTurn("old", "Удали временные файлы");
+
+  for (const call of calls.slice(0, 3)) {
+    assert.ok(call.params.config.mcp_servers[DELETION_TOOLS_SERVER_NAME]);
+  }
+  assert.match(
+    calls[3].params.additionalContext["codex-telegram-remote"].value,
+    /delete_local_paths/,
+  );
+  assert.match(
+    calls[3].params.additionalContext["codex-telegram-remote"].value,
+    /delete_ssh_paths/,
   );
 });
 

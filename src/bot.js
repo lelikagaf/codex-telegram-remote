@@ -4,11 +4,13 @@ const { randomUUID } = require("node:crypto");
 const { formatThread, formatThreadList, threadTitle } = require("./format");
 const { redact } = require("./logger");
 const { TelegramFileTooLargeError } = require("./telegram-client");
+const { CodexRpcError } = require("./codex-client");
 
 const DESKTOP_TURN_SETTLE_MS = 6000;
 const INCOMING_MESSAGE_SETTLE_MS = 8000;
 const TELEGRAM_OUTGOING_FILE_LIMIT_BYTES = 50 * 1024 * 1024;
 const TELEGRAM_OUTGOING_FILE_LIMIT_COUNT = 10;
+const PROMPT_QUEUE_PAGE_SIZE = 10;
 const TELEGRAM_OUTGOING_DENIED_NAMES = new Set([
   ".env",
   ".env.local",
@@ -46,6 +48,7 @@ const HELP_TEXT = [
   "/limits — текущие лимиты Codex",
   "/access — режим доступа Telegram → Codex",
   "/status — состояние текущей задачи",
+  "/queue — очередь сообщений выбранного чата",
   "/stop — остановить текущую задачу",
   "/steer текст — уточнить выполняемую задачу",
   "/approve — разрешить ожидающее действие",
@@ -59,6 +62,45 @@ const HELP_TEXT = [
   "/release 1 — release notes последнего запуска",
   "/releases — история запусков и версий",
 ].join("\n");
+
+function normalizeQueueTarget(target) {
+  if (typeof target === "object" && target) {
+    return {
+      chatId: target.chatId,
+      messageThreadId: target.messageThreadId || null,
+    };
+  }
+  return { chatId: target, messageThreadId: null };
+}
+
+function promptQueueMap(entries) {
+  const queues = new Map();
+  for (const entry of Array.isArray(entries) ? entries : []) {
+    if (!entry?.id || !entry?.threadId || !entry?.text || entry.chatId === undefined) continue;
+    const queue = queues.get(entry.threadId) || [];
+    queue.push({
+      ...entry,
+      messageThreadId: entry.messageThreadId || null,
+    });
+    queues.set(entry.threadId, queue);
+  }
+  return queues;
+}
+
+function flattenPromptQueues(queues) {
+  return [...queues.values()].flat().map((entry) => ({ ...entry }));
+}
+
+function moveQueueItemFirst(queue, itemId) {
+  const index = queue.findIndex((entry) => entry?.id === itemId);
+  if (index <= 0) return [...queue];
+  return [queue[index], ...queue.slice(0, index), ...queue.slice(index + 1)];
+}
+
+function queueEntryPreview(text, limit = 180) {
+  const compact = String(text || "").replace(/\s+/g, " ").trim();
+  return compact.length > limit ? `${compact.slice(0, limit - 3)}...` : compact;
+}
 
 function extractAgentText(item) {
   if (!item) return "";
@@ -672,8 +714,10 @@ class CodexTelegramBot {
     this.incomingMessageSettleMs = Number(config.incomingMessageSettleMs) || INCOMING_MESSAGE_SETTLE_MS;
     this.writerIdleMs = Number(config.writerIdleMs) || 90_000;
     this.writerReleaseTimer = null;
-    this.pendingPromptQueues = new Map();
+    this.pendingPromptQueues = promptQueueMap(this.state.pendingPromptQueue);
     this.drainingPromptThreads = new Set();
+    this.queueListSessions = new Map();
+    this.queueActionInFlight = new Set();
     this.busyQueueNotices = new Set();
     this.writerDecisionInFlight = new Set();
     this.elevationDecisionInFlight = new Set();
@@ -718,6 +762,10 @@ class CodexTelegramBot {
       taskName: this.config.elevationTaskName,
       spoolPath: this.config.elevationSpoolPath,
     });
+    this.logger.info("Удаление файлов через Telegram", {
+      access: this.config.deletionAccess || "off",
+      maxRuntimeSeconds: this.config.deletionMaxRuntimeSeconds,
+    });
     await this.telegram.deleteWebhook();
     await this.telegram.setMyCommands([
       { command: "chats", description: "Список чатов Codex" },
@@ -729,6 +777,7 @@ class CodexTelegramBot {
       { command: "limits", description: "Текущие лимиты Codex" },
       { command: "access", description: "Режим доступа к Codex" },
       { command: "status", description: "Статус задачи" },
+      { command: "queue", description: "Очередь сообщений" },
       { command: "stop", description: "Остановить задачу" },
       { command: "approve", description: "Разрешить действие" },
       { command: "deny", description: "Отклонить действие" },
@@ -762,6 +811,9 @@ class CodexTelegramBot {
       );
     }, this.config.desktopSyncPollMs);
     this.desktopSyncTimer.unref?.();
+    for (const threadId of this.pendingPromptQueues.keys()) {
+      await this.#drainPromptQueue(threadId);
+    }
     this.#scheduleWriterRelease("startup");
   }
 
@@ -795,6 +847,8 @@ class CodexTelegramBot {
     this.writerDecisionInFlight.clear();
     this.elevationDecisionInFlight.clear();
     this.chatListSessions.clear();
+    this.queueListSessions.clear();
+    this.queueActionInFlight.clear();
     this.lastThreadsByTarget.clear();
     this.chatPaginationInFlight.clear();
   }
@@ -1336,6 +1390,13 @@ class CodexTelegramBot {
 
     this.state = this.stateStore.save({ lastChatId: chatId });
     if (message.document) {
+      if (this.#queueEditForTarget(target)) {
+        await this.telegram.sendMessage(
+          target,
+          "Для изменения записи очереди отправьте текстовое сообщение или отмените изменение кнопкой.",
+        );
+        return;
+      }
       await this.#enqueueIncomingMessage(target, message);
       return;
     }
@@ -1350,6 +1411,7 @@ class CodexTelegramBot {
     }
 
     if (!text.startsWith("/")) {
+      if (await this.#applyPendingQueueEdit(target, text)) return;
       await this.#enqueueIncomingMessage(target, message);
       return;
     }
@@ -1410,6 +1472,9 @@ class CodexTelegramBot {
         break;
       case "/status":
         await this.#showStatus(target);
+        break;
+      case "/queue":
+        await this.#showQueue(target);
         break;
       case "/stop":
         await this.#stopTurn(target);
@@ -1477,12 +1542,14 @@ class CodexTelegramBot {
     if (!items.length) {
       const prompt = buildIncomingBatchPrompt({ messages: textItems });
       if (!prompt) return;
-      await this.#queuePrompt(
+      const wasActive = this.activeByThread.has(threadId);
+      const queued = await this.#queuePrompt(
         threadId,
         target,
         prompt,
         { silent: true },
       );
+      if (wasActive) await this.#sendQueueChoice(queued);
       await this.#drainPromptQueue(threadId);
       return;
     }
@@ -1551,12 +1618,14 @@ class CodexTelegramBot {
     }
 
     try {
-      await this.#queuePrompt(
+      const wasActive = this.activeByThread.has(threadId);
+      const queued = await this.#queuePrompt(
         threadId,
         target,
         buildIncomingBatchPrompt({ documents: downloadedDocuments, messages: textItems }),
         { silent: true },
       );
+      if (wasActive) await this.#sendQueueChoice(queued);
       await this.#drainPromptQueue(threadId);
     } catch (error) {
       this.logger.warn("Документы сохранены, но не переданы Codex", {
@@ -1585,6 +1654,7 @@ class CodexTelegramBot {
     const data = String(query.data || "");
     if (await this.#handleElevationCallback(query, target, data)) return;
     if (await this.#handleWriterDecisionCallback(query, target, data)) return;
+    if (await this.#handleQueueCallback(query, target, data)) return;
     if (await this.#handleChatPaginationCallback(query, target, data)) return;
     if (data.startsWith("use:")) {
       const threadId = data.slice(4);
@@ -1593,6 +1663,241 @@ class CodexTelegramBot {
       return;
     }
     await this.telegram.answerCallbackQuery(query.id);
+  }
+
+  #queueListSessionForMessage(target, messageId) {
+    const targetKey = this.#chatListTargetKey(target);
+    return [...this.queueListSessions.values()].find(
+      (session) => session.targetKey === targetKey && session.messageId === messageId,
+    ) || null;
+  }
+
+  #queuePageKeyboard(session, items, page, pageCount) {
+    const offset = (page - 1) * PROMPT_QUEUE_PAGE_SIZE;
+    const keyboard = items.map((entry, index) => {
+      const number = offset + index + 1;
+      return [
+        { text: `${number} ${entry.dispatching ? "Повторить" : "Сейчас"}`, callback_data: `queue:now:${entry.id}` },
+        { text: `${number} Первым`, callback_data: `queue:first:${entry.id}` },
+        { text: `${number} Изменить`, callback_data: `queue:edit:${entry.id}` },
+        { text: `${number} Удалить`, callback_data: `queue:delete:${entry.id}` },
+      ];
+    });
+    if (pageCount > 1) {
+      keyboard.push([
+        ...(page > 1
+          ? [{ text: "Назад", callback_data: `queue:prev:${session.id}` }]
+          : []),
+        { text: `${page}/${pageCount}`, callback_data: `queue:noop:${session.id}` },
+        ...(page < pageCount
+          ? [{ text: "Вперед", callback_data: `queue:next:${session.id}` }]
+          : []),
+      ]);
+    }
+    return keyboard;
+  }
+
+  async #renderQueuePage(target, session, options = {}) {
+    const queue = this.pendingPromptQueues.get(session.threadId) || [];
+    const pageCount = Math.max(1, Math.ceil(queue.length / PROMPT_QUEUE_PAGE_SIZE));
+    const page = Math.min(pageCount, Math.max(1, Number(options.page || session.page || 1)));
+    const offset = (page - 1) * PROMPT_QUEUE_PAGE_SIZE;
+    const items = queue.slice(offset, offset + PROMPT_QUEUE_PAGE_SIZE);
+    session.page = page;
+    session.updatedAt = Date.now();
+    const lines = queue.length
+      ? items.map((entry, index) => {
+        const created = new Date(entry.createdAt || 0).toLocaleTimeString("ru-RU", {
+          hour: "2-digit",
+          minute: "2-digit",
+        });
+        return `${offset + index + 1}. ${created} | ${entry.dispatching
+          ? "Запуск не подтверждён. Проверьте диалог перед повтором. " : ""}${queueEntryPreview(entry.text)}`;
+      })
+      : ["Очередь пуста."];
+    const text = [
+      `Очередь выбранного чата: ${queue.length}.`,
+      ...lines,
+      ...(queue.length ? [`Страница: ${page}/${pageCount}.`] : []),
+    ].join("\n\n");
+    const keyboard = this.#queuePageKeyboard(session, items, page, pageCount);
+    const extra = { reply_markup: { inline_keyboard: keyboard } };
+    const messageId = options.messageId || session.messageId;
+    if (messageId && typeof this.telegram.editMessage === "function") {
+      await this.telegram.editMessage(target, messageId, text, extra);
+      session.messageId = messageId;
+    } else {
+      const message = await this.telegram.sendMessage(target, text, extra);
+      session.messageId = message.message_id;
+    }
+  }
+
+  async #showQueue(target) {
+    const threadId = this.#threadIdForTarget(target);
+    if (!threadId) {
+      await this.telegram.sendMessage(target, "Сначала выберите чат командой /chats.");
+      return;
+    }
+    const session = {
+      id: randomUUID().replace(/-/g, "").slice(0, 16),
+      targetKey: this.#chatListTargetKey(target),
+      threadId,
+      page: 1,
+      messageId: null,
+      updatedAt: Date.now(),
+    };
+    this.queueListSessions.set(session.id, session);
+    while (this.queueListSessions.size > 50) {
+      this.queueListSessions.delete(this.queueListSessions.keys().next().value);
+    }
+    await this.#renderQueuePage(target, session, { page: 1 });
+  }
+
+  async #refreshQueueCallbackMessage(query, target) {
+    const session = this.#queueListSessionForMessage(target, query.message?.message_id);
+    if (session) {
+      await this.#renderQueuePage(target, session, {
+        page: session.page,
+        messageId: query.message?.message_id,
+      });
+      return;
+    }
+    if (query.message?.message_id && query.message?.text && typeof this.telegram.editMessage === "function") {
+      await this.telegram.editMessage(
+        target,
+        query.message.message_id,
+        query.message.text,
+        { reply_markup: { inline_keyboard: [] } },
+      );
+    }
+  }
+
+  async #handleQueueCallback(query, target, data) {
+    const pageMatch = /^queue:(next|prev|noop):([a-f0-9]{16})$/.exec(data);
+    if (pageMatch) {
+      const [, action, sessionId] = pageMatch;
+      const session = this.queueListSessions.get(sessionId);
+      if (!session || session.targetKey !== this.#chatListTargetKey(target)) {
+        await this.telegram.answerCallbackQuery(query.id, "Список устарел. Выполните /queue");
+        return true;
+      }
+      if (action === "noop") {
+        await this.telegram.answerCallbackQuery(query.id, `Страница ${session.page}`);
+        return true;
+      }
+      const page = action === "next" ? session.page + 1 : session.page - 1;
+      await this.#renderQueuePage(target, session, {
+        page,
+        messageId: query.message?.message_id || session.messageId,
+      });
+      await this.telegram.answerCallbackQuery(query.id, `Страница ${session.page}`);
+      return true;
+    }
+
+    const actionMatch = /^queue:(now|keep|first|edit|editcancel|delete):([a-f0-9]{16})$/.exec(data);
+    if (!actionMatch) return false;
+    const [, action, itemId] = actionMatch;
+    if (this.queueActionInFlight.has(itemId)) {
+      await this.telegram.answerCallbackQuery(query.id, "Действие уже выполняется");
+      return true;
+    }
+    this.queueActionInFlight.add(itemId);
+    let callbackAnswered = false;
+    const answer = async (text) => {
+      await this.telegram.answerCallbackQuery(query.id, text);
+      callbackAnswered = true;
+    };
+    try {
+      if (action === "editcancel") {
+        this.#clearQueueEdit(itemId);
+        await answer("Изменение отменено");
+        await this.#refreshQueueCallbackMessage(query, target);
+        return true;
+      }
+
+      const found = this.#queueEntryById(itemId);
+      if (!found) {
+        await answer("Запись уже отсутствует в очереди");
+        await this.#refreshQueueCallbackMessage(query, target);
+        return true;
+      }
+
+      if (action === "keep") {
+        await answer("Сообщение оставлено в очереди");
+      } else if (action === "delete") {
+        this.#removeQueueEntry(itemId);
+        await answer("Сообщение удалено из очереди");
+      } else if (action === "first") {
+        this.#moveQueueEntryFirst(itemId);
+        await answer("Сообщение поставлено первым");
+      } else if (action === "edit") {
+        const normalized = normalizeQueueTarget(target);
+        const edits = (this.state.pendingQueueEdits || []).filter(
+          (item) => item.itemId !== itemId
+            && !(item.chatId === normalized.chatId
+              && (item.messageThreadId || null) === normalized.messageThreadId),
+        );
+        edits.push({
+          itemId,
+          chatId: normalized.chatId,
+          messageThreadId: normalized.messageThreadId,
+          createdAt: Date.now(),
+        });
+        this.state = this.stateStore.save({ pendingQueueEdits: edits });
+        await answer("Ожидаю новый текст");
+        await this.telegram.sendMessage(
+          target,
+          `Отправьте новый текст для записи:\n\n${queueEntryPreview(found.entry.text, 500)}`,
+          {
+            reply_markup: {
+              inline_keyboard: [[
+                { text: "Отменить изменение", callback_data: `queue:editcancel:${itemId}` },
+              ]],
+            },
+          },
+        );
+      } else if (action === "now") {
+        if (found.entry.dispatching && this.drainingPromptThreads.has(found.threadId)) {
+          await answer("Сообщение уже передаётся Codex");
+          return true;
+        }
+        // Only an explicit owner action may retry an unacknowledged dispatch.
+        if (found.entry.dispatching) {
+          found.entry.dispatching = false;
+          this.#savePromptQueues();
+        }
+        const active = this.activeByThread.get(found.threadId);
+        if (active?.turnId) {
+          await this.#withWriterLease(
+            () => this.codex.steerTurn(active.threadId, active.turnId, found.entry.text),
+            "queue-steer",
+          );
+          this.#removeQueueEntry(itemId);
+          await answer("Сообщение передано в текущую задачу");
+        } else {
+          this.#clearQueueEdit(itemId);
+          this.#moveQueueEntryFirst(itemId);
+          await answer("Сообщение поставлено первым и будет запущено при доступности чата");
+        }
+      }
+
+      if (["first", "now"].includes(action)) await this.#drainPromptQueue(found.threadId);
+      await this.#refreshQueueCallbackMessage(query, target);
+    } catch (error) {
+      this.logger.warn("Не удалось выполнить действие с очередью", {
+        itemId,
+        action,
+        message: error.message,
+      });
+      if (!callbackAnswered) {
+        await this.telegram.answerCallbackQuery(query.id, `Ошибка очереди: ${error.message}`);
+      } else {
+        await this.telegram.sendMessage(target, `Ошибка очереди: ${error.message}`);
+      }
+    } finally {
+      this.queueActionInFlight.delete(itemId);
+    }
+    return true;
   }
 
   async #showChats(target) {
@@ -1882,8 +2187,9 @@ class CodexTelegramBot {
       this.pendingPromptQueues.delete(oldThreadId);
       this.pendingPromptQueues.set(thread.id, [
         ...(this.pendingPromptQueues.get(thread.id) || []),
-        ...queued,
+        ...queued.map((entry) => ({ ...entry, threadId: thread.id })),
       ]);
+      this.#savePromptQueues();
     }
 
     const patch = {
@@ -1979,8 +2285,9 @@ class CodexTelegramBot {
       this.pendingPromptQueues.delete(sourceThreadId);
       this.pendingPromptQueues.set(thread.id, [
         ...(this.pendingPromptQueues.get(thread.id) || []),
-        ...remainingQueue,
+        ...remainingQueue.map((entry) => ({ ...entry, threadId: thread.id })),
       ]);
+      this.#savePromptQueues();
     }
 
     this.desktopSyncSuspended = true;
@@ -2459,6 +2766,7 @@ class CodexTelegramBot {
       `Codex app-server: ${this.codex.isRunning ? "работает" : "остановлен"}`,
       `Текущий чат: ${this.#threadNameForTarget(target) || "не выбран"}`,
       `Задача: ${active ? "выполняется" : "нет активной"}`,
+      `Сообщений в очереди: ${threadId ? (this.pendingPromptQueues.get(threadId) || []).length : 0}`,
       `Ожидает взаимодействия: ${approvals.length}`,
       `Ожидает решения по блокировке: ${writerDecisions.length}`,
       `Административные команды: ${elevationRequests.length}`,
@@ -2468,6 +2776,7 @@ class CodexTelegramBot {
       `Подтверждения: ${this.config.codexFullAccess ? "never" : this.config.codexApprovalPolicy}`,
       `Конфликт с Desktop: ${this.config.activeWriterMode || "queue"}`,
       `Повышение Windows: ${this.config.elevationMode || "off"}`,
+      `Удаление файлов: ${this.config.deletionAccess || "off"}`,
       `Загружено ботом чатов: ${this.codex.loadedThreadCount ?? "неизвестно"}`,
     ];
     await this.telegram.sendMessage(target, lines.join("\n"));
@@ -2479,6 +2788,7 @@ class CodexTelegramBot {
     const outgoingFileAccess = this.config.telegramOutgoingFileAccess || "workspace";
     const writerMode = this.config.activeWriterMode || "queue";
     const elevationMode = this.config.elevationMode || "off";
+    const deletionAccess = this.config.deletionAccess || "off";
     const writerModeDescription = writerMode === "ask"
       ? "спросить: создать копию или отменить сообщение"
       : writerMode === "fork"
@@ -2496,24 +2806,134 @@ class CodexTelegramBot {
         `Файлов из одного ответа: ${this.config.telegramOutgoingMaxFiles > 0 ? this.config.telegramOutgoingMaxFiles : "без ограничения"}`,
         `Конфликт writer с Desktop: ${writerMode} — ${writerModeDescription}`,
         `Административные команды Windows: ${elevationMode === "ask" ? "подтверждение кнопкой в Telegram" : elevationMode === "always" ? "автоматическое выполнение" : "отключены"}`,
+        `Удаление файлов: ${deletionAccess === "all" ? "локально и по SSH, без подтверждения" : deletionAccess === "local" ? "локально, без подтверждения" : "отключено"}`,
         "Область: каждый новый ход через Telegram, во всех старых и новых чатах.",
         "Computer Use и плагины наследуются от Codex; административные команды выполняются отдельным повышенным помощником.",
-        "Отключение доступа к другим чатам: CODEX_APP_TOOLS_ENABLED=false; файлов: TELEGRAM_OUTGOING_FILE_ACCESS=off. Затем перезапустить задачу.",
+        "Отключение доступа к другим чатам: CODEX_APP_TOOLS_ENABLED=false; отправки файлов: TELEGRAM_OUTGOING_FILE_ACCESS=off; удаления: CODEX_DELETION_ACCESS=off. Затем перезапустить задачу.",
       ].join("\n"),
     );
   }
 
+  #savePromptQueues(extraPatch = {}) {
+    this.state = this.stateStore.save({
+      pendingPromptQueue: flattenPromptQueues(this.pendingPromptQueues),
+      ...extraPatch,
+    });
+  }
+
+  #queueEntryById(itemId) {
+    for (const [threadId, queue] of this.pendingPromptQueues) {
+      const index = queue.findIndex((entry) => entry.id === itemId);
+      if (index !== -1) return { threadId, queue, index, entry: queue[index] };
+    }
+    return null;
+  }
+
+  #targetForQueueEntry(entry) {
+    return { chatId: entry.chatId, messageThreadId: entry.messageThreadId || null };
+  }
+
+  #removeQueueEntry(itemId) {
+    const found = this.#queueEntryById(itemId);
+    if (!found) return null;
+    found.queue.splice(found.index, 1);
+    if (!found.queue.length) this.pendingPromptQueues.delete(found.threadId);
+    const edits = (this.state.pendingQueueEdits || []).filter((item) => item.itemId !== itemId);
+    this.#savePromptQueues({ pendingQueueEdits: edits });
+    return found.entry;
+  }
+
+  #moveQueueEntryFirst(itemId) {
+    const found = this.#queueEntryById(itemId);
+    if (!found) return null;
+    const reordered = moveQueueItemFirst(found.queue, itemId);
+    this.pendingPromptQueues.set(found.threadId, reordered);
+    this.#savePromptQueues();
+    return reordered[0];
+  }
+
+  #queueEditForTarget(target) {
+    const normalized = normalizeQueueTarget(target);
+    return (this.state.pendingQueueEdits || []).find(
+      (item) => item.chatId === normalized.chatId
+        && (item.messageThreadId || null) === normalized.messageThreadId,
+    ) || null;
+  }
+
+  #clearQueueEdit(itemId) {
+    const edits = (this.state.pendingQueueEdits || []).filter((item) => item.itemId !== itemId);
+    this.state = this.stateStore.save({ pendingQueueEdits: edits });
+  }
+
+  #queueActionKeyboard(itemId) {
+    return {
+      inline_keyboard: [
+        [
+          { text: "Передать сейчас", callback_data: `queue:now:${itemId}` },
+          { text: "После завершения", callback_data: `queue:keep:${itemId}` },
+        ],
+        [
+          { text: "Поставить первой", callback_data: `queue:first:${itemId}` },
+          { text: "Изменить", callback_data: `queue:edit:${itemId}` },
+          { text: "Удалить", callback_data: `queue:delete:${itemId}` },
+        ],
+      ],
+    };
+  }
+
+  async #sendQueueChoice(entry, options = {}) {
+    const target = options.target || this.#targetForQueueEntry(entry);
+    const heading = options.heading || "Сообщение добавлено в очередь.";
+    await this.telegram.sendMessage(
+      target,
+      `${heading}\n\n${queueEntryPreview(entry.text, 500)}`,
+      { reply_markup: this.#queueActionKeyboard(entry.id) },
+    );
+  }
+
+  async #applyPendingQueueEdit(target, text) {
+    const edit = this.#queueEditForTarget(target);
+    if (!edit) return false;
+    const found = this.#queueEntryById(edit.itemId);
+    if (!found) {
+      this.#clearQueueEdit(edit.itemId);
+      await this.telegram.sendMessage(target, "Запись уже отсутствует в очереди. Текст не был отправлен в Codex.");
+      return true;
+    }
+    found.entry.text = text;
+    found.entry.updatedAt = Date.now();
+    const edits = (this.state.pendingQueueEdits || []).filter((item) => item.itemId !== edit.itemId);
+    this.#savePromptQueues({ pendingQueueEdits: edits });
+    await this.#sendQueueChoice(found.entry, {
+      target,
+      heading: "Запись очереди изменена.",
+    });
+    await this.#drainPromptQueue(found.threadId);
+    return true;
+  }
+
   async #queuePrompt(threadId, chatId, text, options = {}) {
+    const target = normalizeQueueTarget(chatId);
     const queue = this.pendingPromptQueues.get(threadId) || [];
-    queue.push({ chatId, text });
+    const entry = {
+      id: randomUUID().replace(/-/g, "").slice(0, 16),
+      threadId,
+      chatId: target.chatId,
+      messageThreadId: target.messageThreadId,
+      text,
+      createdAt: Date.now(),
+      updatedAt: null,
+    };
+    queue.push(entry);
     this.pendingPromptQueues.set(threadId, queue);
-    if (options.silent) return false;
+    this.#savePromptQueues();
+    if (options.silent) return entry;
     const prefix = options.messagePrefix || "⏳ Codex уже работает. Задача поставлена в очередь";
     await this.telegram.sendMessage(
-      chatId,
+      target,
       `${prefix}: ${queue.length}.`,
     );
-    return false;
+    return entry;
   }
 
   async #drainPromptQueue(threadId) {
@@ -2521,16 +2941,16 @@ class CodexTelegramBot {
     if (this.activeByThread.has(threadId)) return;
     const queue = this.pendingPromptQueues.get(threadId);
     if (!queue?.length) return;
+    if (queue[0].dispatching) return;
+    if ((this.state.pendingQueueEdits || []).some((edit) => edit.itemId === queue[0].id)) return;
 
     this.drainingPromptThreads.add(threadId);
     try {
-      const next = queue.shift();
-      if (queue.length) {
-        this.pendingPromptQueues.set(threadId, queue);
-      } else {
-        this.pendingPromptQueues.delete(threadId);
-      }
-      await this.#sendPrompt(next.chatId, next.text, { queueWhenBusy: true });
+      const next = queue[0];
+      await this.#sendPrompt(this.#targetForQueueEntry(next), next.text, {
+        queueWhenBusy: true,
+        queueEntryId: next.id,
+      });
     } finally {
       this.drainingPromptThreads.delete(threadId);
       this.#scheduleWriterRelease("queue-drain");
@@ -2555,7 +2975,10 @@ class CodexTelegramBot {
       return false;
     }
     if (this.activeByThread.has(threadId)) {
-      if (options.queueWhenBusy) return this.#queuePrompt(threadId, target, text, { silent: true });
+      if (options.queueWhenBusy) {
+        if (options.queueEntryId) return false;
+        return this.#queuePrompt(threadId, target, text, { silent: true });
+      }
       await this.telegram.sendMessage(
         target,
         "В этом чате уже выполняется задача. Используй /steer текст или /stop.",
@@ -2566,8 +2989,14 @@ class CodexTelegramBot {
     try {
       await this.codex.ensureRuntimeReady?.();
     } catch (error) {
-      this.logger.warn("Codex не готов принять новую задачу", { threadId, message: error.message });
-      await this.telegram.sendMessage(target, `Не удалось подготовить Codex: ${error.message}\nСообщение не передано в обработку.`);
+      const key = this.#busyQueueNoticeKey(threadId, target, text);
+      if (!this.busyQueueNotices.has(key)) {
+        this.logger.warn("Codex не готов принять новую задачу", { threadId, message: error.message });
+      }
+      await this.#notifyQueuedBusyOnce(threadId, target, text,
+        `Не удалось подготовить Codex: ${error.message}\n${options.queueEntryId
+          ? "Сообщение сохранено в очереди. Повторю после восстановления Codex."
+          : "Сообщение не передано в обработку."}`);
       return false;
     }
     let isUnmaterialized = this.unmaterializedThreadIds.has(threadId);
@@ -2607,6 +3036,7 @@ class CodexTelegramBot {
           text,
           "⏳ Этот чат сейчас занят в приложении Codex. Задача остаётся в очереди.",
         );
+        if (options.queueEntryId) return false;
         return this.#queuePrompt(threadId, target, text, { silent: true });
       }
       this.#scheduleWriterRelease("busy-thread");
@@ -2652,6 +3082,7 @@ class CodexTelegramBot {
             text,
             "⏳ Этот чат сейчас открыт или занят в приложении Codex. Задача остаётся в очереди.",
           );
+          if (options.queueEntryId) return false;
           return this.#queuePrompt(threadId, target, text, { silent: true });
         } else {
           await this.telegram.sendMessage(
@@ -2683,9 +3114,15 @@ class CodexTelegramBot {
     };
     this.activeByThread.set(threadId, context);
 
+    const queuedEntry = options.queueEntryId ? this.#queueEntryById(options.queueEntryId)?.entry : null;
     try {
       const pendingModel = this.state.pendingThreadModelSettings?.[threadId];
       if (pendingModel) await this.codex.updateThreadModelSettings(threadId, pendingModel);
+      if (queuedEntry) {
+        // Persist before the RPC so a crash cannot replay an accepted turn.
+        queuedEntry.dispatching = true;
+        this.#savePromptQueues();
+      }
       const result = await this.codex.startTurn(threadId, text);
       if (isUnmaterialized) this.#markThreadUnmaterialized(threadId, false);
       if (pendingModel) {
@@ -2694,6 +3131,7 @@ class CodexTelegramBot {
         this.state = this.stateStore.save({ pendingThreadModelSettings: remaining });
       }
       context.turnId = result.turn.id;
+      if (options.queueEntryId) this.#removeQueueEntry(options.queueEntryId);
       this.#rememberTurn(context.turnId, true, {
         threadId,
         chatId: target.chatId,
@@ -2702,9 +3140,16 @@ class CodexTelegramBot {
       if (!context.completed) this.activeByTurn.set(context.turnId, context);
       return true;
     } catch (error) {
+      if (queuedEntry?.dispatching && error instanceof CodexRpcError) {
+        queuedEntry.dispatching = false;
+        this.#savePromptQueues();
+      }
       this.activeByThread.delete(threadId);
       this.#scheduleWriterRelease("turn-start-error");
-      await this.telegram.editMessage(target, progress.message_id, `❌ ${error.message}`);
+      const uncertain = queuedEntry?.dispatching
+        ? "\nРезультат запуска неизвестен. Автоповтор остановлен. Проверьте диалог, затем выберите повтор или удаление в /queue."
+        : "";
+      await this.telegram.editMessage(target, progress.message_id, `❌ ${error.message}${uncertain}`);
       return false;
     }
   }
@@ -3130,6 +3575,7 @@ module.exports = {
   formatModelList,
   formatModelSettings,
   formatTelegramTurnResult,
+  flattenPromptQueues,
   hasActiveTurn,
   isAgentMessage,
   isActiveTurnStatus,
@@ -3140,6 +3586,9 @@ module.exports = {
   isUnmaterializedThreadError,
   isUserMessage,
   modelByName,
+  moveQueueItemFirst,
+  promptQueueMap,
+  queueEntryPreview,
   reasoningEffortDescription,
   reasoningEffortOptions,
   resolveTelegramUploadCwd,

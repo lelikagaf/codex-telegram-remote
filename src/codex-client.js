@@ -6,6 +6,7 @@ const { missingRuntimeFiles } = require("./codex-binary");
 
 const CHAT_TOOLS_SERVER_NAME = "codex_telegram_chats";
 const ELEVATION_TOOLS_SERVER_NAME = "codex_telegram_elevation";
+const DELETION_TOOLS_SERVER_NAME = "codex_telegram_deletion";
 
 function buildToolOverrides({
   enabled,
@@ -17,6 +18,8 @@ function buildToolOverrides({
   elevationTaskName = "Codex Telegram Elevated Helper",
   elevationTimeoutMs = 300_000,
   elevationMaxRuntimeSeconds = 600,
+  deletionAccess = "off",
+  deletionMaxRuntimeSeconds = 600,
 }) {
   const mcpServers = {};
   if (enabled) {
@@ -50,6 +53,29 @@ function buildToolOverrides({
       tool_timeout_sec: Math.ceil((elevationTimeoutMs + 660_000) / 1000),
     };
   }
+  if (deletionAccess !== "off") {
+    const serverPath = path.resolve(__dirname, "..", "scripts", "codex-deletion-mcp.js");
+    const approvalMode = "approve";
+    mcpServers[DELETION_TOOLS_SERVER_NAME] = {
+      command: process.execPath,
+      args: [serverPath],
+      env: {
+        CODEX_DELETION_ACCESS: deletionAccess,
+        CODEX_DELETION_MAX_RUNTIME_SECONDS: String(deletionMaxRuntimeSeconds),
+        CODEX_DELETION_PROTECTED_PATHS: JSON.stringify([
+          path.resolve(__dirname, ".."),
+          cwd ? path.resolve(cwd) : null,
+        ].filter(Boolean)),
+      },
+      startup_timeout_sec: 30,
+      tool_timeout_sec: deletionMaxRuntimeSeconds + 30,
+      default_tools_approval_mode: approvalMode,
+      tools: {
+        delete_local_paths: { approval_mode: approvalMode },
+        delete_ssh_paths: { approval_mode: approvalMode },
+      },
+    };
+  }
   if (!Object.keys(mcpServers).length) return {};
   return {
     config: {
@@ -59,7 +85,7 @@ function buildToolOverrides({
 }
 
 function buildChatToolsOverrides(options) {
-  return buildToolOverrides({ ...options, elevationMode: "off" });
+  return buildToolOverrides({ ...options, elevationMode: "off", deletionAccess: "off" });
 }
 
 function buildCodexAppServerArgs({
@@ -105,6 +131,8 @@ class CodexClient extends EventEmitter {
     elevationTaskName = "Codex Telegram Elevated Helper",
     elevationTimeoutMs = 300_000,
     elevationMaxRuntimeSeconds = 600,
+    deletionAccess = "off",
+    deletionMaxRuntimeSeconds = 600,
     logger,
   }) {
     super();
@@ -120,6 +148,8 @@ class CodexClient extends EventEmitter {
     this.elevationTaskName = elevationTaskName;
     this.elevationTimeoutMs = elevationTimeoutMs;
     this.elevationMaxRuntimeSeconds = elevationMaxRuntimeSeconds;
+    this.deletionAccess = deletionAccess;
+    this.deletionMaxRuntimeSeconds = deletionMaxRuntimeSeconds;
     this.logger = logger;
     this.child = null;
     this.lineReader = null;
@@ -190,6 +220,7 @@ class CodexClient extends EventEmitter {
       fullAccess: this.fullAccess,
       appToolsEnabled: this.appToolsEnabled,
       elevationMode: this.elevationMode,
+      deletionAccess: this.deletionAccess,
     });
     this.loadedThreads.clear();
     const child = this.spawnProcess(
@@ -417,6 +448,8 @@ class CodexClient extends EventEmitter {
       elevationTaskName: this.elevationTaskName,
       elevationTimeoutMs: this.elevationTimeoutMs,
       elevationMaxRuntimeSeconds: this.elevationMaxRuntimeSeconds,
+      deletionAccess: this.deletionAccess,
+      deletionMaxRuntimeSeconds: this.deletionMaxRuntimeSeconds,
     });
     const result = await this.request(
       "thread/resume",
@@ -458,6 +491,8 @@ class CodexClient extends EventEmitter {
       elevationTaskName: this.elevationTaskName,
       elevationTimeoutMs: this.elevationTimeoutMs,
       elevationMaxRuntimeSeconds: this.elevationMaxRuntimeSeconds,
+      deletionAccess: this.deletionAccess,
+      deletionMaxRuntimeSeconds: this.deletionMaxRuntimeSeconds,
     });
     const result = await this.request(
       "thread/start",
@@ -497,6 +532,8 @@ class CodexClient extends EventEmitter {
       elevationTaskName: this.elevationTaskName,
       elevationTimeoutMs: this.elevationTimeoutMs,
       elevationMaxRuntimeSeconds: this.elevationMaxRuntimeSeconds,
+      deletionAccess: this.deletionAccess,
+      deletionMaxRuntimeSeconds: this.deletionMaxRuntimeSeconds,
     });
     const result = await this.request(
       "thread/fork",
@@ -590,6 +627,14 @@ class CodexClient extends EventEmitter {
         "For UAC/admin operations or errors saying elevation is required, call run_windows_command_as_administrator instead of Start-Process -Verb RunAs or asking for a local UAC click.",
       );
     }
+    if (this.deletionAccess !== "off") {
+      if (!contextLines.length) contextLines.push(`Current Codex thread ID: ${threadId}`);
+      contextLines.push(
+        `The codex_telegram_deletion tools are enabled with ${this.deletionAccess} access.`,
+        "When the owner explicitly asks to delete files or directories, use delete_local_paths for Windows paths and delete_ssh_paths for SSH server paths.",
+        "Use exact paths and only delete targets explicitly requested by the owner. Respect policy and permission denials; never bypass them with another tool.",
+      );
+    }
     const appContext = contextLines.length
       ? {
           additionalContext: {
@@ -667,6 +712,7 @@ class CodexClient extends EventEmitter {
 
 module.exports = {
   CHAT_TOOLS_SERVER_NAME,
+  DELETION_TOOLS_SERVER_NAME,
   ELEVATION_TOOLS_SERVER_NAME,
   CodexClient,
   CodexRpcError,

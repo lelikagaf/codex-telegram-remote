@@ -5,7 +5,7 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const { CodexTelegramBot } = require("../src/bot");
-const { CodexClient } = require("../src/codex-client");
+const { CodexClient, CodexRpcError } = require("../src/codex-client");
 const { StateStore } = require("../src/state-store");
 
 const catalog = [
@@ -72,7 +72,7 @@ function setup(t, previous = null) {
       case "thread/unsubscribe": record.loaded = false; return {};
       case "turn/start":
         turnAttempts.push({ threadId: record.id, model: record.model, effort: record.reasoningEffort });
-        if (faults.turn) throw new Error("turn failed");
+        if (faults.turn) throw new CodexRpcError("turn/start", { message: "turn failed" });
         record.materialized = true;
         return { turn: { id: `turn-${turnAttempts.length}` } };
       default: assert.fail(`Unexpected RPC ${method}`);
@@ -161,6 +161,78 @@ test("failed runtime preflight does not create a replacement chat or submit the 
   assert.equal(h.turnAttempts.length, 0);
   assert.equal(h.store.state.currentThreadId, "orphan");
   assert.equal(h.calls.some((c) => c.method === "thread/start"), false);
+});
+
+test("queued message survives runtime failure and restart, then starts exactly once", async (t) => {
+  const h = setup(t);
+  h.select({ materialized: true });
+  h.codex.ensureRuntimeReady = async () => { throw new Error("Runtime unavailable during update"); };
+  await h.command("Keep this queued", 77);
+  await waitFor(() => h.sent.some((item) => /Runtime unavailable/.test(item.text)));
+  const entry = h.store.state.pendingPromptQueue[0];
+  assert.equal(entry.text, "Keep this queued");
+  h.codex.loadedThreads.clear();
+  h.bot.stop();
+  const restarted = setup(t, h);
+  const press = () => restarted.bot.handleUpdate({ callback_query: {
+    id: "retry-runtime", from: { id: 7 }, data: `queue:first:${entry.id}`,
+    message: { message_id: 9, chat: { id: 100 }, message_thread_id: 77 },
+  } });
+  restarted.bot.telegram.answerCallbackQuery = async () => {};
+  let healthy = false;
+  restarted.codex.ensureRuntimeReady = async () => {
+    if (!healthy) throw new Error("Runtime unavailable during update");
+  };
+  await press();
+  await press();
+  assert.equal(restarted.turnAttempts.length, 0);
+  assert.equal(restarted.store.state.pendingPromptQueue.length, 1);
+  assert.equal(restarted.sent.filter((item) => /Runtime unavailable/.test(item.text)).length, 1);
+  healthy = true;
+  await press();
+  await press();
+  assert.equal(restarted.turnAttempts.length, 1);
+  assert.equal(restarted.store.state.pendingPromptQueue.length, 0);
+});
+
+test("uncertain turn dispatch survives restart without automatic replay", async (t) => {
+  const h = setup(t);
+  h.select({ materialized: true });
+  h.codex.startTurn = async () => { throw new Error("transport disconnected after submission"); };
+  await h.command("Do not replay this task", 77);
+  await waitFor(() => h.sent.some((item) => /Автоповтор остановлен/.test(item.text)));
+  const entry = h.store.state.pendingPromptQueue[0];
+  assert.equal(entry.dispatching, true);
+  h.bot.stop();
+  const restarted = setup(t, h);
+  restarted.bot.telegram.answerCallbackQuery = async () => {};
+  const press = (action) => restarted.bot.handleUpdate({ callback_query: {
+    id: `uncertain-${action}`, from: { id: 7 }, data: `queue:${action}:${entry.id}`,
+    message: { message_id: 9, chat: { id: 100 }, message_thread_id: 77 },
+  } });
+  await press("first");
+  await press("first");
+  await restarted.command("/queue", 77);
+  assert.equal(restarted.turnAttempts.length, 0);
+  assert.equal(restarted.store.state.pendingPromptQueue[0].dispatching, true);
+  assert.ok(restarted.sent.some((item) => /Запуск не подтверждён/.test(item.text)));
+  await press("now");
+  assert.equal(restarted.turnAttempts.length, 1);
+  assert.equal(restarted.store.state.pendingPromptQueue.length, 0);
+});
+
+test("dispatch marker is persisted before submitting the queued turn", async (t) => {
+  const h = setup(t);
+  h.select({ materialized: true });
+  h.codex.startTurn = async () => {
+    const disk = JSON.parse(fs.readFileSync(path.join(h.directory, "state.json"), "utf8"));
+    assert.equal(disk.pendingPromptQueue[0].dispatching, true);
+    h.turnAttempts.push({ checked: true });
+    return { turn: { id: "acknowledged" } };
+  };
+  await h.command("One submission", 77);
+  await waitFor(() => h.turnAttempts.length === 1);
+  assert.equal(h.store.state.pendingPromptQueue.length, 0);
 });
 
 for (const command of ["/model", "/model@ocume_bot", "/model status"]) {
