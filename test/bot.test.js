@@ -17,6 +17,7 @@ const {
   formatModelList,
   formatModelSettings,
   formatTelegramTurnResult,
+  flattenPromptQueues,
   hasActiveTurn,
   isAgentMessage,
   isActiveWriterError,
@@ -27,9 +28,11 @@ const {
   isUnmaterializedThreadError,
   isUserMessage,
   modelByName,
+  moveQueueItemFirst,
   nextTelegramUploadPath,
   resolveTelegramUploadCwd,
   sanitizeTelegramFileName,
+  promptQueueMap,
   shouldWaitForTurnAnswer,
   unseenSyncTurns,
   unseenTerminalTurns,
@@ -55,6 +58,8 @@ function createStateStore(overrides = {}) {
       unmaterializedThreadIds: [],
       pendingWriterDecisions: [],
       pendingElevationRequests: [],
+      pendingPromptQueue: [],
+      pendingQueueEdits: [],
       ...overrides,
     },
     save(patch) {
@@ -371,6 +376,7 @@ test("команда /model добавлена в меню быстрых ком
   assert.equal(commands.some((item) => item.command === "model"), true);
   assert.equal(commands.some((item) => item.command === "limits"), true);
   assert.equal(commands.some((item) => item.command === "access"), true);
+  assert.equal(commands.some((item) => item.command === "queue"), true);
   assert.equal(commands.some((item) => item.command === "answer"), true);
   assert.equal(commands.some((item) => item.command === "unlock"), true);
 });
@@ -1543,6 +1549,288 @@ test("несколько Telegram-сообщений склеиваются в �
   await waitFor(() => prompts.length === 1);
 
   assert.equal(prompts[0], "Первая часть\n\nВторая часть");
+});
+
+test("постановка записи первой сохраняет относительный порядок остальных после перезагрузки", () => {
+  const original = [
+    { id: "a", threadId: "thread-1", chatId: 100, text: "A" },
+    { id: "b", threadId: "thread-1", chatId: 100, text: "B" },
+    { id: "c", threadId: "thread-1", chatId: 100, text: "C" },
+    { id: "d", threadId: "thread-1", chatId: 100, text: "D" },
+  ];
+
+  const promoted = moveQueueItemFirst(original, "c");
+  assert.deepEqual(promoted.map((item) => item.id), ["c", "a", "b", "d"]);
+  assert.deepEqual(original.map((item) => item.id), ["a", "b", "c", "d"]);
+
+  const persisted = flattenPromptQueues(new Map([["thread-1", promoted]]));
+  const restored = promptQueueMap(JSON.parse(JSON.stringify(persisted)));
+  assert.deepEqual(restored.get("thread-1").map((item) => item.id), ["c", "a", "b", "d"]);
+
+  const promotedAgain = moveQueueItemFirst(restored.get("thread-1"), "d");
+  assert.deepEqual(promotedAgain.map((item) => item.id), ["d", "c", "a", "b"]);
+});
+
+test("повторная проверка занятого Desktop не переставляет сообщения очереди", async () => {
+  const telegram = new EventEmitter();
+  telegram.sendMessage = async () => ({ message_id: 1 });
+  const codex = new EventEmitter();
+  codex.readThread = async () => ({ thread: { status: { type: "idle" }, turns: [] } });
+  codex.listTurns = async () => ({ data: [{ id: "desktop", status: "inProgress" }] });
+  codex.startTurn = async () => assert.fail("Новый turn не должен запускаться");
+
+  const stateStore = createStateStore();
+  const bot = new CodexTelegramBot({
+    telegram,
+    codex,
+    stateStore,
+    config: { allowedUserId: 7, desktopSyncPollMs: 1000, incomingMessageSettleMs: 1 },
+    logger: createLogger(),
+  });
+
+  for (const text of ["A", "B", "C", "D"]) {
+    await bot.handleUpdate({
+      message: { from: { id: 7 }, chat: { id: 100 }, text },
+    });
+    await waitFor(() => stateStore.state.pendingPromptQueue.length === "ABCD".indexOf(text) + 1);
+  }
+
+  assert.deepEqual(
+    stateStore.state.pendingPromptQueue.map((item) => item.text),
+    ["A", "B", "C", "D"],
+  );
+});
+
+test("очередь позволяет поднять, изменить и передать выбранную запись в активную задачу", async () => {
+  const sent = [];
+  const edits = [];
+  const callbacks = [];
+  const steered = [];
+  const started = [];
+  const telegram = new EventEmitter();
+  telegram.sendMessage = async (target, text, extra = {}) => {
+    const message = { target, text, extra, message_id: sent.length + 1 };
+    sent.push(message);
+    return message;
+  };
+  telegram.editMessage = async (target, messageId, text, extra = {}) => {
+    edits.push({ target, messageId, text, extra });
+    return { message_id: messageId };
+  };
+  telegram.sendLongMessage = async () => [];
+  telegram.answerCallbackQuery = async (id, text) => callbacks.push({ id, text });
+
+  let turnNumber = 0;
+  const codex = new EventEmitter();
+  codex.resumeThread = async () => {};
+  codex.readThread = async () => ({ thread: { status: { type: "idle" }, turns: [] } });
+  codex.listTurns = async () => ({ data: [] });
+  codex.startTurn = async (_threadId, text) => {
+    started.push(text);
+    return { turn: { id: `turn-${++turnNumber}` } };
+  };
+  codex.steerTurn = async (threadId, turnId, text) => steered.push({ threadId, turnId, text });
+  codex.unsubscribeThread = async () => {};
+
+  const stateStore = createStateStore();
+  const bot = new CodexTelegramBot({
+    telegram,
+    codex,
+    stateStore,
+    config: { allowedUserId: 7, desktopSyncPollMs: 1000, incomingMessageSettleMs: 1 },
+    logger: createLogger(),
+  });
+
+  const sendText = async (text) => {
+    await bot.handleUpdate({
+      message: { from: { id: 7 }, chat: { id: 100 }, text },
+    });
+  };
+  const press = async (action, itemId, number) => {
+    await bot.handleUpdate({
+      callback_query: {
+        id: `callback-${number}`,
+        from: { id: 7 },
+        data: `queue:${action}:${itemId}`,
+        message: { message_id: 500 + number, chat: { id: 100 }, text: "Управление очередью" },
+      },
+    });
+  };
+
+  await sendText("Активная задача");
+  await waitFor(() => turnNumber === 1);
+  for (const text of ["Вторая", "Третья", "Четвертая"]) {
+    await sendText(text);
+    await waitFor(() => stateStore.state.pendingPromptQueue.length
+      === ["Вторая", "Третья", "Четвертая"].indexOf(text) + 1);
+  }
+
+  assert.ok(sent.some((item) => item.extra.reply_markup?.inline_keyboard
+    ?.flat().some((button) => button.text === "Передать сейчас")));
+  const [second, third, fourth] = stateStore.state.pendingPromptQueue;
+
+  await press("first", third.id, 1);
+  assert.deepEqual(
+    stateStore.state.pendingPromptQueue.map((item) => item.text),
+    ["Третья", "Вторая", "Четвертая"],
+  );
+  await press("first", fourth.id, 2);
+  assert.deepEqual(
+    stateStore.state.pendingPromptQueue.map((item) => item.text),
+    ["Четвертая", "Третья", "Вторая"],
+  );
+
+  const restored = promptQueueMap(
+    JSON.parse(JSON.stringify(stateStore.state.pendingPromptQueue)),
+  ).get("thread-1");
+  assert.deepEqual(restored.map((item) => item.text), ["Четвертая", "Третья", "Вторая"]);
+
+  await press("edit", third.id, 3);
+  await sendText("Третья изменена");
+  assert.deepEqual(
+    stateStore.state.pendingPromptQueue.map((item) => item.text),
+    ["Четвертая", "Третья изменена", "Вторая"],
+  );
+  assert.equal(stateStore.state.pendingQueueEdits.length, 0);
+
+  await press("now", second.id, 4);
+  assert.deepEqual(steered, [{
+    threadId: "thread-1",
+    turnId: "turn-1",
+    text: "Вторая",
+  }]);
+  assert.deepEqual(
+    stateStore.state.pendingPromptQueue.map((item) => item.text),
+    ["Четвертая", "Третья изменена"],
+  );
+  assert.ok(callbacks.some((item) => /поставлено первым/i.test(item.text)));
+  assert.ok(callbacks.some((item) => /передано в текущую задачу/i.test(item.text)));
+
+  await sendText("/queue");
+  assert.match(sent.at(-1).text, /Очередь выбранного чата: 2/);
+  assert.ok(sent.at(-1).extra.reply_markup.inline_keyboard.flat()
+    .some((button) => /Изменить/.test(button.text)));
+
+  codex.emit("notification", {
+    method: "turn/completed",
+    params: {
+      threadId: "thread-1",
+      turn: { id: "turn-1", threadId: "thread-1", status: "completed" },
+    },
+  });
+  await waitFor(() => started.length === 2);
+  assert.deepEqual(started, ["Активная задача", "Четвертая"]);
+  assert.deepEqual(
+    stateStore.state.pendingPromptQueue.map((item) => item.text),
+    ["Третья изменена"],
+  );
+});
+
+test("команда /queue листает очередь по десять записей", async () => {
+  const sent = [];
+  const edited = [];
+  const telegram = new EventEmitter();
+  telegram.sendMessage = async (target, text, extra = {}) => {
+    const message = { target, text, extra, message_id: 77 };
+    sent.push(message);
+    return message;
+  };
+  telegram.editMessage = async (target, messageId, text, extra = {}) => {
+    edited.push({ target, messageId, text, extra });
+    return { message_id: messageId };
+  };
+  telegram.answerCallbackQuery = async () => {};
+
+  const pendingPromptQueue = Array.from({ length: 12 }, (_, index) => ({
+    id: (index + 1).toString(16).padStart(16, "0"),
+    threadId: "thread-1",
+    chatId: 100,
+    messageThreadId: null,
+    text: `Сообщение ${index + 1}`,
+    createdAt: Date.now() + index,
+  }));
+  const bot = new CodexTelegramBot({
+    telegram,
+    codex: new EventEmitter(),
+    stateStore: createStateStore({ pendingPromptQueue }),
+    config: { allowedUserId: 7, desktopSyncPollMs: 1000 },
+    logger: createLogger(),
+  });
+
+  await bot.handleUpdate({
+    message: { from: { id: 7 }, chat: { id: 100 }, text: "/queue" },
+  });
+  assert.match(sent.at(-1).text, /Страница: 1\/2/);
+  const next = sent.at(-1).extra.reply_markup.inline_keyboard.flat()
+    .find((button) => button.text === "Вперед");
+  assert.ok(next);
+
+  await bot.handleUpdate({
+    callback_query: {
+      id: "queue-next",
+      from: { id: 7 },
+      data: next.callback_data,
+      message: { message_id: 77, chat: { id: 100 }, text: sent.at(-1).text },
+    },
+  });
+  assert.match(edited.at(-1).text, /11\..*Сообщение 11/);
+  assert.match(edited.at(-1).text, /12\..*Сообщение 12/);
+  assert.match(edited.at(-1).text, /Страница: 2\/2/);
+});
+
+test("ожидающее изменение очереди продолжается после восстановления состояния", async () => {
+  const first = {
+    id: "0000000000000001",
+    threadId: "thread-1",
+    chatId: 100,
+    messageThreadId: null,
+    text: "Первая",
+    createdAt: 1,
+  };
+  const second = {
+    id: "0000000000000002",
+    threadId: "thread-1",
+    chatId: 100,
+    messageThreadId: null,
+    text: "Старый текст",
+    createdAt: 2,
+  };
+  const stateStore = createStateStore({
+    pendingPromptQueue: [first, second],
+    pendingQueueEdits: [{
+      itemId: second.id,
+      chatId: 100,
+      messageThreadId: null,
+      createdAt: 3,
+    }],
+  });
+  const telegram = new EventEmitter();
+  telegram.sendMessage = async () => ({ message_id: 1 });
+  const started = [];
+  const codex = new EventEmitter();
+  codex.resumeThread = async () => {};
+  codex.readThread = async () => ({ thread: { status: { type: "idle" }, turns: [] } });
+  codex.listTurns = async () => ({ data: [] });
+  codex.startTurn = async (_threadId, text) => {
+    started.push(text);
+    return { turn: { id: "turn-restored" } };
+  };
+  const bot = new CodexTelegramBot({
+    telegram,
+    codex,
+    stateStore,
+    config: { allowedUserId: 7, desktopSyncPollMs: 1000, incomingMessageSettleMs: 1 },
+    logger: createLogger(),
+  });
+
+  await bot.handleUpdate({
+    message: { from: { id: 7 }, chat: { id: 100 }, text: "Новый текст" },
+  });
+  await waitFor(() => started.length === 1);
+
+  assert.deepEqual(started, ["Первая"]);
+  assert.deepEqual(stateStore.state.pendingPromptQueue.map((item) => item.text), ["Новый текст"]);
+  assert.deepEqual(stateStore.state.pendingQueueEdits, []);
 });
 
 test("распознаётся ошибка ещё не материализованного чата", () => {

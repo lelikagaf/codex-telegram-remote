@@ -285,6 +285,18 @@ const RELEASE_HISTORY = [
       "/access and /status now show the effective deletion mode.",
     ],
   },
+  {
+    id: "2026-09-25-persistent-prompt-queue-controls",
+    version: "0.1.26",
+    sequence: 26,
+    title: "Persistent Telegram prompt queue controls",
+    notes: [
+      "Messages sent during an active Telegram task now show controls for steering, waiting, prioritizing, editing, or deleting the queued message.",
+      "Added /queue with ten entries per page and inline controls for every queued message.",
+      "The prompt queue and pending edits survive bot restarts.",
+      "Moving one message to the front preserves the relative order of every other queued message.",
+    ],
+  },
 ];
 
 const CURRENT_RELEASE = RELEASE_HISTORY.at(-1);
