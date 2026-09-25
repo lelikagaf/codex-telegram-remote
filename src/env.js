@@ -65,6 +65,14 @@ function parseElevationMode(value) {
   throw error;
 }
 
+function parseDeletionAccess(value) {
+  const mode = String(value || "off").trim().toLowerCase();
+  if (["off", "local", "all"].includes(mode)) return mode;
+  const error = new Error("CODEX_DELETION_ACCESS должен быть off, local или all.");
+  error.exitCode = 78;
+  throw error;
+}
+
 function parseOutgoingFileAccess(value) {
   const mode = String(value || "workspace").trim().toLowerCase();
   if (["off", "workspace", "all"].includes(mode)) return mode;
@@ -149,6 +157,9 @@ function loadConfig(projectRoot) {
     elevationSpoolPath:
       (process.env.CODEX_ELEVATION_SPOOL_PATH || "").trim() ||
       path.join(process.env.LOCALAPPDATA || projectRoot, "CodexTelegramRemote", "elevation"),
+    deletionAccess: parseDeletionAccess(process.env.CODEX_DELETION_ACCESS),
+    deletionMaxRuntimeSeconds:
+      Math.max(30, Number(process.env.CODEX_DELETION_MAX_RUNTIME_SECONDS) || 600),
     defaultCwd,
     notifyOnStart: parseBoolean(process.env.TELEGRAM_NOTIFY_ON_START, true),
     notifyAfterSleep: parseBoolean(process.env.TELEGRAM_NOTIFY_AFTER_SLEEP, false),
@@ -185,6 +196,7 @@ module.exports = {
   parseApprovalPolicy,
   parseActiveWriterMode,
   parseBoolean,
+  parseDeletionAccess,
   parseElevationMode,
   parseEnv,
   parseFileSizeLimitMb,

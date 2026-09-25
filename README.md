@@ -22,6 +22,7 @@
 - `/status`, `/stop`, `/steer текст` — управление выполняющейся задачей;
 - `/approve` и `/deny` — ответы на запросы разрешения Codex;
 - подтверждение административных команд Windows кнопкой в Telegram;
+- управляемое удаление локальных файлов и файлов на SSH-серверах;
 - потоковое обновление ответа в Telegram;
 - финальный ответ на Telegram-задачу отдельным новым сообщением, чтобы телефон
   показывал обычное уведомление;
@@ -138,6 +139,8 @@ CODEX_ELEVATION_TASK_NAME=Codex Telegram Elevated Helper
 CODEX_ELEVATION_TIMEOUT_SECONDS=300
 CODEX_ELEVATION_MAX_RUNTIME_SECONDS=600
 CODEX_ELEVATION_SPOOL_PATH=
+CODEX_DELETION_ACCESS=off
+CODEX_DELETION_MAX_RUNTIME_SECONDS=600
 TELEGRAM_NOTIFY_ON_START=true
 TELEGRAM_NOTIFY_AFTER_SLEEP=false
 TELEGRAM_MAX_FILE_SIZE_MB=0
@@ -180,6 +183,13 @@ LOG_LEVEL=info
 `CODEX_ELEVATION_TIMEOUT_SECONDS` задаёт срок действия запроса, а
 `CODEX_ELEVATION_MAX_RUNTIME_SECONDS` — предельное время команды. Каталог
 очереди по умолчанию расположен в `%LOCALAPPDATA%\CodexTelegramRemote\elevation`.
+`CODEX_DELETION_ACCESS=local` подключает отдельный инструмент удаления явных
+локальных путей. Значение `all` дополнительно разрешает удаление явных путей на
+SSH-серверах. В обоих режимах операция выполняется без дополнительного вопроса,
+если владелец прямо попросил удалить файлы или каталоги. Значение `off` полностью
+отключает инструмент. Корни дисков, корень профиля Windows, корень рабочего
+каталога Codex и системные корневые каталоги удалять нельзя даже в режиме `all`.
+`CODEX_DELETION_MAX_RUNTIME_SECONDS` ограничивает длительность SSH-удаления.
 `TELEGRAM_MAX_FILE_SIZE_MB` задаёт максимальный размер загружаемого документа в
 мегабайтах. Значения `0` и `-1` отключают ограничение со стороны бота. При этом
 могут сохраняться собственные технические ограничения Telegram Bot API.

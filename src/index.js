@@ -76,6 +76,8 @@ async function main() {
     elevationTaskName: config.elevationTaskName,
     elevationTimeoutMs: config.elevationTimeoutMs,
     elevationMaxRuntimeSeconds: config.elevationMaxRuntimeSeconds,
+    deletionAccess: config.deletionAccess,
+    deletionMaxRuntimeSeconds: config.deletionMaxRuntimeSeconds,
     logger,
   });
   const elevationQueue = new ElevationQueue({

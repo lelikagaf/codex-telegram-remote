@@ -4,6 +4,7 @@ const {
   parseActiveWriterMode,
   parseApprovalPolicy,
   parseBoolean,
+  parseDeletionAccess,
   parseElevationMode,
   parseEnv,
   parseFileSizeLimitMb,
@@ -46,6 +47,13 @@ test("parseElevationMode принимает off, ask и always", () => {
   assert.equal(parseElevationMode("ASK"), "ask");
   assert.equal(parseElevationMode("always"), "always");
   assert.throws(() => parseElevationMode("admin"), /CODEX_ELEVATION_MODE/);
+});
+
+test("parseDeletionAccess принимает off, local и all", () => {
+  assert.equal(parseDeletionAccess(undefined), "off");
+  assert.equal(parseDeletionAccess("LOCAL"), "local");
+  assert.equal(parseDeletionAccess("all"), "all");
+  assert.throws(() => parseDeletionAccess("always"), /CODEX_DELETION_ACCESS/);
 });
 
 test("parseOutgoingFileAccess принимает управляемые режимы", () => {

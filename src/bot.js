@@ -715,6 +715,10 @@ class CodexTelegramBot {
       taskName: this.config.elevationTaskName,
       spoolPath: this.config.elevationSpoolPath,
     });
+    this.logger.info("Удаление файлов через Telegram", {
+      access: this.config.deletionAccess || "off",
+      maxRuntimeSeconds: this.config.deletionMaxRuntimeSeconds,
+    });
     await this.telegram.deleteWebhook();
     await this.telegram.setMyCommands([
       { command: "chats", description: "Список чатов Codex" },
@@ -2465,6 +2469,7 @@ class CodexTelegramBot {
       `Подтверждения: ${this.config.codexFullAccess ? "never" : this.config.codexApprovalPolicy}`,
       `Конфликт с Desktop: ${this.config.activeWriterMode || "queue"}`,
       `Повышение Windows: ${this.config.elevationMode || "off"}`,
+      `Удаление файлов: ${this.config.deletionAccess || "off"}`,
       `Загружено ботом чатов: ${this.codex.loadedThreadCount ?? "неизвестно"}`,
     ];
     await this.telegram.sendMessage(target, lines.join("\n"));
@@ -2476,6 +2481,7 @@ class CodexTelegramBot {
     const outgoingFileAccess = this.config.telegramOutgoingFileAccess || "workspace";
     const writerMode = this.config.activeWriterMode || "queue";
     const elevationMode = this.config.elevationMode || "off";
+    const deletionAccess = this.config.deletionAccess || "off";
     const writerModeDescription = writerMode === "ask"
       ? "спросить: создать копию или отменить сообщение"
       : writerMode === "fork"
@@ -2493,9 +2499,10 @@ class CodexTelegramBot {
         `Файлов из одного ответа: ${this.config.telegramOutgoingMaxFiles > 0 ? this.config.telegramOutgoingMaxFiles : "без ограничения"}`,
         `Конфликт writer с Desktop: ${writerMode} — ${writerModeDescription}`,
         `Административные команды Windows: ${elevationMode === "ask" ? "подтверждение кнопкой в Telegram" : elevationMode === "always" ? "автоматическое выполнение" : "отключены"}`,
+        `Удаление файлов: ${deletionAccess === "all" ? "локально и по SSH, без подтверждения" : deletionAccess === "local" ? "локально, без подтверждения" : "отключено"}`,
         "Область: каждый новый ход через Telegram, во всех старых и новых чатах.",
         "Computer Use и плагины наследуются от Codex; административные команды выполняются отдельным повышенным помощником.",
-        "Отключение доступа к другим чатам: CODEX_APP_TOOLS_ENABLED=false; файлов: TELEGRAM_OUTGOING_FILE_ACCESS=off. Затем перезапустить задачу.",
+        "Отключение доступа к другим чатам: CODEX_APP_TOOLS_ENABLED=false; отправки файлов: TELEGRAM_OUTGOING_FILE_ACCESS=off; удаления: CODEX_DELETION_ACCESS=off. Затем перезапустить задачу.",
       ].join("\n"),
     );
   }

@@ -273,6 +273,18 @@ const RELEASE_HISTORY = [
       "Limit usage, remaining percentage, reset time, plan and credits are formatted for Telegram.",
     ],
   },
+  {
+    id: "2026-09-25-configurable-deletion-bridge",
+    version: "0.1.25",
+    sequence: 25,
+    title: "Configurable local and SSH deletion",
+    notes: [
+      "Added CODEX_DELETION_ACCESS with off, local and all modes.",
+      "Explicit deletion requests can remove exact local paths and, in all mode, exact paths on SSH servers.",
+      "The dedicated deletion tools verify targets and results while rejecting filesystem roots and broad protected roots.",
+      "/access and /status now show the effective deletion mode.",
+    ],
+  },
 ];
 
 const CURRENT_RELEASE = RELEASE_HISTORY.at(-1);
