@@ -17,6 +17,8 @@ const {
   formatModelList,
   formatModelSettings,
   formatTelegramTurnResult,
+  formatIncomingAttachmentLimitExceeded,
+  formatTelegramCloudDownloadLimitExceeded,
   flattenPromptQueues,
   hasActiveTurn,
   isAgentMessage,
@@ -33,6 +35,7 @@ const {
   nextTelegramUploadPath,
   resolveTelegramUploadCwd,
   sanitizeTelegramFileName,
+  selectLargestTelegramPhoto,
   promptQueueMap,
   shouldWaitForTurnAnswer,
   unseenSyncTurns,
@@ -2156,6 +2159,244 @@ test("Telegram-документ больше настроенного лимит
 
   assert.equal(downloadCalls, 0);
   assert.match(sent.at(-1).text, /больше разрешённого лимита/);
+});
+
+test("для Telegram-фото выбирается вариант с максимальным размером и разрешением", () => {
+  assert.equal(selectLargestTelegramPhoto([
+    { file_id: "small", file_size: 100, width: 320, height: 200 },
+    { file_id: "large-area", file_size: 200, width: 1280, height: 720 },
+    { file_id: "large-bytes", file_size: 300, width: 800, height: 600 },
+  ]).file_id, "large-bytes");
+  assert.equal(selectLargestTelegramPhoto([
+    { file_id: "same-small", file_size: 100, width: 320, height: 200 },
+    { file_id: "same-large", file_size: 100, width: 1920, height: 1080 },
+  ]).file_id, "same-large");
+});
+
+test("отключённое фото отклоняется с точным именем флага", async () => {
+  const sent = [];
+  let downloadCalls = 0;
+  const telegram = new EventEmitter();
+  telegram.sendMessage = async (chatId, text) => {
+    sent.push({ chatId, text });
+    return { message_id: 1 };
+  };
+  telegram.downloadFile = async () => { downloadCalls += 1; };
+  const bot = new CodexTelegramBot({
+    telegram,
+    codex: new EventEmitter(),
+    stateStore: createStateStore(),
+    config: {
+      allowedUserId: 7,
+      desktopSyncPollMs: 1000,
+      telegramPhotoEnabled: false,
+      incomingMessageSettleMs: 1,
+    },
+    logger: createLogger(),
+  });
+
+  await bot.handleUpdate({
+    message: {
+      message_id: 57,
+      from: { id: 7 },
+      chat: { id: 100 },
+      photo: [{ file_id: "photo-disabled", file_size: 500, width: 640, height: 480 }],
+    },
+  });
+
+  assert.equal(downloadCalls, 0);
+  assert.match(sent.at(-1).text, /Фото не принято/);
+  assert.match(sent.at(-1).text, /TELEGRAM_PHOTO_ENABLED=true/);
+});
+
+test("фото и видео одного альбома скачиваются с отдельными лимитами и передаются Codex", async () => {
+  const megabyte = 1024 * 1024;
+  const sent = [];
+  const downloads = [];
+  const telegram = new EventEmitter();
+  telegram.sendMessage = async (chatId, text) => {
+    sent.push({ chatId, text });
+    return { message_id: sent.length };
+  };
+  telegram.editMessage = async () => {};
+  telegram.downloadFile = async (fileId, destinationPath, options) => {
+    downloads.push({ fileId, destinationPath, options });
+    return { path: destinationPath, size: fileId === "photo-large" ? 8 * megabyte : 10 * megabyte };
+  };
+
+  const prompts = [];
+  const codex = new EventEmitter();
+  codex.resumeThread = async () => {};
+  codex.readThread = async () => ({
+    thread: { cwd: "C:\\Project", status: { type: "idle" }, turns: [] },
+  });
+  codex.listTurns = async () => ({ data: [] });
+  codex.startTurn = async (_threadId, text) => {
+    prompts.push(text);
+    return { turn: { id: "media-turn" } };
+  };
+
+  const bot = new CodexTelegramBot({
+    telegram,
+    codex,
+    stateStore: createStateStore(),
+    config: {
+      allowedUserId: 7,
+      defaultCwd: "C:\\Project",
+      desktopSyncPollMs: 1000,
+      telegramPhotoEnabled: true,
+      telegramVideoEnabled: true,
+      telegramPhotoMaxFileBytes: 100 * megabyte,
+      telegramVideoMaxFileBytes: 100 * megabyte,
+      incomingMessageSettleMs: 1,
+    },
+    logger: createLogger(),
+  });
+
+  await bot.handleUpdate({
+    message: {
+      message_id: 58,
+      media_group_id: "media-album",
+      from: { id: 7 },
+      chat: { id: 100 },
+      caption: "Сравни изображение и видео.",
+      photo: [
+        { file_id: "photo-small", file_size: megabyte, width: 320, height: 180 },
+        { file_id: "photo-large", file_size: 8 * megabyte, width: 1920, height: 1080 },
+      ],
+    },
+  });
+  await bot.handleUpdate({
+    message: {
+      message_id: 59,
+      media_group_id: "media-album",
+      from: { id: 7 },
+      chat: { id: 100 },
+      video: {
+        file_id: "video-main",
+        file_name: "demo.mp4",
+        file_size: 10 * megabyte,
+        mime_type: "video/mp4",
+      },
+    },
+  });
+
+  await waitFor(() => prompts.length === 1);
+
+  assert.deepEqual(downloads.map((item) => item.fileId), ["photo-large", "video-main"]);
+  assert.deepEqual(downloads.map((item) => item.options.maxBytes), [100 * megabyte, 100 * megabyte]);
+  assert.match(downloads[0].destinationPath, /58-photo\.jpg$/);
+  assert.match(downloads[1].destinationPath, /59-demo\.mp4$/);
+  assert.match(prompts[0], /Тип: фото/);
+  assert.match(prompts[0], /Тип: видео/);
+  assert.match(prompts[0], /Сравни изображение и видео/);
+  assert.equal(sent.at(-1).text, "⏳ Codex начинает работу…");
+});
+
+test("превышение лимита видео сообщает фактический размер, лимит и настройку", async () => {
+  const megabyte = 1024 * 1024;
+  const sent = [];
+  let downloadCalls = 0;
+  const telegram = new EventEmitter();
+  telegram.sendMessage = async (chatId, text) => {
+    sent.push({ chatId, text });
+    return { message_id: 1 };
+  };
+  telegram.downloadFile = async () => { downloadCalls += 1; };
+  const bot = new CodexTelegramBot({
+    telegram,
+    codex: new EventEmitter(),
+    stateStore: createStateStore(),
+    config: {
+      allowedUserId: 7,
+      desktopSyncPollMs: 1000,
+      telegramVideoEnabled: true,
+      telegramVideoMaxFileBytes: 100 * megabyte,
+      incomingMessageSettleMs: 1,
+    },
+    logger: createLogger(),
+  });
+
+  await bot.handleUpdate({
+    message: {
+      message_id: 60,
+      from: { id: 7 },
+      chat: { id: 100 },
+      video: {
+        file_id: "video-large",
+        file_name: "large.mp4",
+        file_size: 125 * megabyte,
+        mime_type: "video/mp4",
+      },
+    },
+  });
+  await waitFor(() => sent.length > 0);
+
+  assert.equal(downloadCalls, 0);
+  assert.match(sent.at(-1).text, /Видео «large\.mp4»: фактический размер 125 МБ/);
+  assert.match(sent.at(-1).text, /лимита 100 МБ/);
+  assert.match(sent.at(-1).text, /TELEGRAM_VIDEO_MAX_FILE_SIZE_MB/);
+  assert.match(
+    formatIncomingAttachmentLimitExceeded({
+      type: "photo",
+      typeLabel: "Фото",
+      fileSize: 101 * megabyte,
+      maxBytes: 100 * megabyte,
+      limitVariable: "TELEGRAM_PHOTO_MAX_FILE_SIZE_MB",
+    }),
+    /Фото: фактический размер 101 МБ.*100 МБ/s,
+  );
+});
+
+test("внешний лимит Telegram 20 МБ объясняется отдельно от лимита бота 100 МБ", async () => {
+  const megabyte = 1024 * 1024;
+  const sent = [];
+  let downloadCalls = 0;
+  const telegram = new EventEmitter();
+  telegram.sendMessage = async (chatId, text) => {
+    sent.push({ chatId, text });
+    return { message_id: 1 };
+  };
+  telegram.downloadFile = async () => { downloadCalls += 1; };
+  const bot = new CodexTelegramBot({
+    telegram,
+    codex: new EventEmitter(),
+    stateStore: createStateStore(),
+    config: {
+      allowedUserId: 7,
+      desktopSyncPollMs: 1000,
+      telegramVideoEnabled: true,
+      telegramVideoMaxFileBytes: 100 * megabyte,
+      incomingMessageSettleMs: 1,
+    },
+    logger: createLogger(),
+  });
+
+  await bot.handleUpdate({
+    message: {
+      message_id: 61,
+      from: { id: 7 },
+      chat: { id: 100 },
+      video: {
+        file_id: "video-cloud-large",
+        file_name: "cloud-limit.mp4",
+        file_size: 50 * megabyte,
+        mime_type: "video/mp4",
+      },
+    },
+  });
+  await waitFor(() => sent.length > 0);
+
+  assert.equal(downloadCalls, 0);
+  assert.match(sent.at(-1).text, /Фактический размер: 50 МБ/);
+  assert.match(sent.at(-1).text, /Внешний лимит Telegram: 20 МБ/);
+  assert.match(sent.at(-1).text, /Настроенный лимит бота: 100 МБ/);
+  assert.match(formatTelegramCloudDownloadLimitExceeded({
+    type: "photo",
+    typeLabel: "Фото",
+    fileSize: 21 * megabyte,
+    maxBytes: 100 * megabyte,
+  }), /Фото не может быть скачано.*21 МБ.*20 МБ.*100 МБ/s);
 });
 
 test("пропущенный финал Telegram повторно доставляется фоновым опросом", async () => {

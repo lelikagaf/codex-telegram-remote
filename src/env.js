@@ -164,6 +164,18 @@ function loadConfig(projectRoot) {
     notifyOnStart: parseBoolean(process.env.TELEGRAM_NOTIFY_ON_START, true),
     notifyAfterSleep: parseBoolean(process.env.TELEGRAM_NOTIFY_AFTER_SLEEP, false),
     telegramMaxFileBytes: parseFileSizeLimitMb(process.env.TELEGRAM_MAX_FILE_SIZE_MB, 0),
+    telegramPhotoEnabled: parseBoolean(process.env.TELEGRAM_PHOTO_ENABLED, false),
+    telegramVideoEnabled: parseBoolean(process.env.TELEGRAM_VIDEO_ENABLED, false),
+    telegramPhotoMaxFileBytes: parseFileSizeLimitMb(
+      process.env.TELEGRAM_PHOTO_MAX_FILE_SIZE_MB,
+      20,
+      "TELEGRAM_PHOTO_MAX_FILE_SIZE_MB",
+    ),
+    telegramVideoMaxFileBytes: parseFileSizeLimitMb(
+      process.env.TELEGRAM_VIDEO_MAX_FILE_SIZE_MB,
+      20,
+      "TELEGRAM_VIDEO_MAX_FILE_SIZE_MB",
+    ),
     telegramOutgoingFileAccess: parseOutgoingFileAccess(
       process.env.TELEGRAM_OUTGOING_FILE_ACCESS,
     ),

@@ -147,6 +147,10 @@ CODEX_DELETION_MAX_RUNTIME_SECONDS=600
 TELEGRAM_NOTIFY_ON_START=true
 TELEGRAM_NOTIFY_AFTER_SLEEP=false
 TELEGRAM_MAX_FILE_SIZE_MB=0
+TELEGRAM_PHOTO_ENABLED=false
+TELEGRAM_VIDEO_ENABLED=false
+TELEGRAM_PHOTO_MAX_FILE_SIZE_MB=20
+TELEGRAM_VIDEO_MAX_FILE_SIZE_MB=20
 TELEGRAM_OUTGOING_FILE_ACCESS=workspace
 TELEGRAM_OUTGOING_MAX_FILE_SIZE_MB=50
 TELEGRAM_OUTGOING_MAX_FILES=10
@@ -211,6 +215,15 @@ SSH-серверах. В обоих режимах операция выполн
 `TELEGRAM_MAX_FILE_SIZE_MB` задаёт максимальный размер загружаемого документа в
 мегабайтах. Значения `0` и `-1` отключают ограничение со стороны бота. При этом
 могут сохраняться собственные технические ограничения Telegram Bot API.
+`TELEGRAM_PHOTO_ENABLED` и `TELEGRAM_VIDEO_ENABLED` независимо включают приём
+обычных фотографий и видео. Для фотографии бот выбирает вариант с максимальным
+разрешением. Подписи, альбомы и текст, отправленный рядом, передаются Codex как
+одна посылка. `TELEGRAM_PHOTO_MAX_FILE_SIZE_MB` и
+`TELEGRAM_VIDEO_MAX_FILE_SIZE_MB` задают отдельные лимиты. При превышении бот
+сообщает тип медиа, фактический размер, установленный лимит и имя настройки.
+При работе через стандартный `api.telegram.org` действует внешний лимит Telegram
+на скачивание 20 МБ. Значение 100 МБ в настройке бота не отменяет этот предел:
+для файла от 20 до 100 МБ бот сообщает оба лимита и не начинает загрузку.
 `TELEGRAM_OUTGOING_FILE_ACCESS` управляет обратной отправкой файлов, на которые
 Codex сослался в финальном ответе: `off` отключает её, `workspace` разрешает
 только файлы внутри `CODEX_DEFAULT_CWD`, а `all` разрешает любой читаемый файл,

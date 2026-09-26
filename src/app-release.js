@@ -322,6 +322,18 @@ const RELEASE_HISTORY = [
       "Startup cleanup removes queue entries that were blocked by an expired decision.",
     ],
   },
+  {
+    id: "2026-09-26-incoming-photo-video-support",
+    version: "0.1.29",
+    sequence: 29,
+    title: "Configurable incoming photo and video support",
+    notes: [
+      "Added independent switches for receiving Telegram photos and videos.",
+      "Added separate photo and video size limits with precise over-limit messages.",
+      "Photos use the largest available Telegram variant; albums, captions and adjacent text stay in one Codex task.",
+      "The standard Telegram API 20 MB download cap is reported separately from the configured bot limit.",
+    ],
+  },
 ];
 
 const CURRENT_RELEASE = RELEASE_HISTORY.at(-1);
