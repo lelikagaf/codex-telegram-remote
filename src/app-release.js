@@ -311,6 +311,17 @@ const RELEASE_HISTORY = [
       "Persist a dispatch marker before submitting queued work; ambiguous results require an explicit owner retry instead of automatic replay after a crash.",
     ],
   },
+  {
+    id: "2026-09-26-blocked-chat-notification-loop-fix",
+    version: "0.1.28",
+    sequence: 28,
+    title: "Blocked chat notification loop fix",
+    notes: [
+      "A message rejected by a pending blocked-chat decision is now removed from the persistent queue after one notification.",
+      "Pending blocked-chat decisions expire after 24 hours instead of surviving indefinitely.",
+      "Startup cleanup removes queue entries that were blocked by an expired decision.",
+    ],
+  },
 ];
 
 const CURRENT_RELEASE = RELEASE_HISTORY.at(-1);

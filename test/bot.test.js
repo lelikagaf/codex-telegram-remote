@@ -27,6 +27,7 @@ const {
   isThreadBusy,
   isUnmaterializedThreadError,
   isUserMessage,
+  isWriterDecisionExpired,
   modelByName,
   moveQueueItemFirst,
   nextTelegramUploadPath,
@@ -965,6 +966,7 @@ test("режим ask при блокировке ждёт решения и от
     message: { from: { id: 7 }, chat: { id: 100 }, text: "Не запускай без решения" },
   });
   await waitFor(() => stateStore.state.pendingWriterDecisions.length === 1);
+  assert.deepEqual(stateStore.state.pendingPromptQueue, []);
 
   const decision = stateStore.state.pendingWriterDecisions[0];
   const keyboard = sent.find((item) => /Что сделать/.test(item.text)).extra.reply_markup.inline_keyboard;
@@ -978,6 +980,7 @@ test("режим ask при блокировке ждёт решения и от
   });
   await waitFor(() => sent.some((item) => /Сначала выберите/.test(item.text)));
   assert.equal(stateStore.state.pendingWriterDecisions.length, 1);
+  assert.deepEqual(stateStore.state.pendingPromptQueue, []);
   assert.equal(startCalls, 0);
 
   await bot.handleUpdate({ callback_query: {
@@ -993,6 +996,59 @@ test("режим ask при блокировке ждёт решения и от
   assert.match(edits.at(-1).text, /диалог не продолжен/);
   assert.equal(callbacks.at(-1).text, "Сообщение отменено");
   bot.stop();
+});
+
+test("просроченное решение ask и заблокированная им очередь удаляются при запуске", async () => {
+  const oldCreatedAt = new Date(Date.now() - (25 * 60 * 60 * 1000)).toISOString();
+  const decision = {
+    id: "fedcba0987654321",
+    threadId: "thread-old",
+    chatId: 100,
+    messageThreadId: null,
+    text: "Старое сообщение",
+    promptMessageId: 55,
+    createdAt: oldCreatedAt,
+  };
+  const telegram = new EventEmitter();
+  telegram.deleteWebhook = async () => {};
+  telegram.setMyCommands = async () => {};
+  telegram.sendMessage = async () => ({ message_id: 1 });
+  const codex = new EventEmitter();
+  codex.ensureStarted = async () => {};
+  const warnings = [];
+  const logger = createLogger();
+  logger.warn = (message, details) => warnings.push({ message, details });
+  const stateStore = createStateStore({
+    currentThreadId: null,
+    currentThreadName: null,
+    lastChatId: null,
+    desktopSyncThreadId: null,
+    pendingWriterDecisions: [decision],
+    pendingPromptQueue: [{
+      id: "queue-old",
+      threadId: "thread-old",
+      chatId: 100,
+      messageThreadId: null,
+      text: "Сообщение после старого запроса",
+      createdAt: Date.now(),
+    }],
+  });
+  const bot = new CodexTelegramBot({
+    telegram,
+    codex,
+    stateStore,
+    config: { allowedUserId: 7, desktopSyncPollMs: 1000 },
+    logger,
+  });
+
+  await bot.initialize();
+  bot.stop();
+
+  assert.equal(isWriterDecisionExpired(decision), true);
+  assert.equal(isWriterDecisionExpired({ ...decision, createdAt: new Date().toISOString() }), false);
+  assert.deepEqual(stateStore.state.pendingWriterDecisions, []);
+  assert.deepEqual(stateStore.state.pendingPromptQueue, []);
+  assert.deepEqual(warnings.at(-1).details, { decisions: 1, queueEntries: 1 });
 });
 
 test("решение ask после перезапуска создаёт копию и запускает сохранённое сообщение", async () => {

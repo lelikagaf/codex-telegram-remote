@@ -11,6 +11,7 @@ const INCOMING_MESSAGE_SETTLE_MS = 8000;
 const TELEGRAM_OUTGOING_FILE_LIMIT_BYTES = 50 * 1024 * 1024;
 const TELEGRAM_OUTGOING_FILE_LIMIT_COUNT = 10;
 const PROMPT_QUEUE_PAGE_SIZE = 10;
+const WRITER_DECISION_TTL_MS = 24 * 60 * 60 * 1000;
 const TELEGRAM_OUTGOING_DENIED_NAMES = new Set([
   ".env",
   ".env.local",
@@ -100,6 +101,11 @@ function moveQueueItemFirst(queue, itemId) {
 function queueEntryPreview(text, limit = 180) {
   const compact = String(text || "").replace(/\s+/g, " ").trim();
   return compact.length > limit ? `${compact.slice(0, limit - 3)}...` : compact;
+}
+
+function isWriterDecisionExpired(decision, now = Date.now()) {
+  const createdAt = Date.parse(decision?.createdAt);
+  return !Number.isFinite(createdAt) || now - createdAt >= WRITER_DECISION_TTL_MS;
 }
 
 function extractAgentText(item) {
@@ -749,6 +755,7 @@ class CodexTelegramBot {
 
   async initialize() {
     this.#initializeTelegramFinalDeliveryTracking();
+    this.#pruneExpiredWriterDecisions();
     this.logger.info("Настройки исходящих файлов Telegram", {
       access: this.config.telegramOutgoingFileAccess || "workspace",
       maxFileBytes: this.config.telegramOutgoingMaxFileBytes,
@@ -1067,6 +1074,44 @@ class CodexTelegramBot {
     );
   }
 
+  #pruneExpiredWriterDecisions(now = Date.now()) {
+    const decisions = Array.isArray(this.state.pendingWriterDecisions)
+      ? this.state.pendingWriterDecisions
+      : [];
+    const expired = decisions.filter((item) => isWriterDecisionExpired(item, now));
+    if (!expired.length) return;
+
+    const expiredIds = new Set(expired.map((item) => item.id));
+    let removedQueueEntries = 0;
+    for (const [threadId, queue] of this.pendingPromptQueues) {
+      const matchingDecisions = expired.filter((item) => item.threadId === threadId);
+      if (!matchingDecisions.length) continue;
+      const remaining = queue.filter((entry) => {
+        const blockedByExpiredDecision = matchingDecisions.some((decision) => {
+          const decisionCreatedAt = Date.parse(decision.createdAt);
+          return Number(decision.chatId) === Number(entry.chatId)
+            && Number(decision.messageThreadId || 0) === Number(entry.messageThreadId || 0)
+            && (!Number.isFinite(decisionCreatedAt)
+              || !Number.isFinite(Number(entry.createdAt))
+              || Number(entry.createdAt) >= decisionCreatedAt);
+        });
+        if (blockedByExpiredDecision) removedQueueEntries += 1;
+        return !blockedByExpiredDecision;
+      });
+      if (remaining.length) this.pendingPromptQueues.set(threadId, remaining);
+      else this.pendingPromptQueues.delete(threadId);
+    }
+
+    this.state = this.stateStore.save({
+      pendingWriterDecisions: decisions.filter((item) => !expiredIds.has(item.id)),
+      pendingPromptQueue: flattenPromptQueues(this.pendingPromptQueues),
+    });
+    this.logger.warn("Удалены просроченные решения по заблокированным чатам", {
+      decisions: expired.length,
+      queueEntries: removedQueueEntries,
+    });
+  }
+
   #removeWriterDecision(decisionId) {
     this.state = this.stateStore.save({
       pendingWriterDecisions: (this.state.pendingWriterDecisions || []).filter(
@@ -1075,9 +1120,10 @@ class CodexTelegramBot {
     });
   }
 
-  async #requestWriterDecision(threadId, target, text) {
+  async #requestWriterDecision(threadId, target, text, options = {}) {
     const existing = this.#writerDecisionForTarget(threadId, target);
     if (existing) {
+      if (options.queueEntryId) this.#removeQueueEntry(options.queueEntryId);
       await this.telegram.sendMessage(
         target,
         "🔒 Этот чат всё ещё заблокирован. Сначала выберите действие в предыдущем сообщении. Новое сообщение не отправлено в Codex.",
@@ -1119,6 +1165,7 @@ class CodexTelegramBot {
       chatId: target.chatId,
       messageThreadId: target.messageThreadId || null,
     });
+    if (options.queueEntryId) this.#removeQueueEntry(options.queueEntryId);
     this.#scheduleWriterRelease("writer-decision-requested");
     return false;
   }
@@ -2964,10 +3011,18 @@ class CodexTelegramBot {
       await this.telegram.sendMessage(target, "Сначала выбери чат командой /chats.");
       return false;
     }
-    if (
-      !options.writerDecisionResolved &&
-      this.#writerDecisionForTarget(threadId, target)
-    ) {
+    const pendingWriterDecision = !options.writerDecisionResolved
+      ? this.#writerDecisionForTarget(threadId, target)
+      : null;
+    if (pendingWriterDecision) {
+      if (options.queueEntryId) {
+        this.#removeQueueEntry(options.queueEntryId);
+        this.logger.info("Удалено отклонённое сообщение из очереди заблокированного чата", {
+          decisionId: pendingWriterDecision.id,
+          queueEntryId: options.queueEntryId,
+          threadId,
+        });
+      }
       await this.telegram.sendMessage(
         target,
         "🔒 Сначала выберите, что делать с предыдущим сообщением. Новое сообщение не отправлено в Codex.",
@@ -3027,7 +3082,7 @@ class CodexTelegramBot {
     }
     if (!isUnmaterialized && (isThreadBusy(current.thread) || hasActiveTurn(recentTurns.data))) {
       if (this.config.activeWriterMode === "ask") {
-        return this.#requestWriterDecision(threadId, target, text);
+        return this.#requestWriterDecision(threadId, target, text, options);
       }
       if (options.queueWhenBusy) {
         await this.#notifyQueuedBusyOnce(
@@ -3059,7 +3114,7 @@ class CodexTelegramBot {
         isUnmaterialized = true;
       } else if (isActiveWriterError(error)) {
         if (this.config.activeWriterMode === "ask") {
-          return this.#requestWriterDecision(threadId, target, text);
+          return this.#requestWriterDecision(threadId, target, text, options);
         } else if (this.config.activeWriterMode === "fork") {
           try {
             threadId = await this.#forkThreadForTelegram(target, threadId);
@@ -3580,6 +3635,7 @@ module.exports = {
   isAgentMessage,
   isActiveTurnStatus,
   isDesktopTurnSettled,
+  isWriterDecisionExpired,
   isActiveWriterError,
   isTerminalTurnStatus,
   isThreadBusy,
